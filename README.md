@@ -109,6 +109,13 @@ radeon = D3DVP(device="Radeon")
 Interleave(intel.subtitle("Intel"),nvidia.subtitle("NVIDIA"),radeon.subtitle("radeon"))
 ```
 
+```
+# インタレ解除して1280x720にリサイズ
+srcfile="..."
+LWLibavVideoSource(srcfile)
+D3DVP(width=1280,height=720)
+```
+
 ## ライセンス
 
 D3DVPのソースコードはMITライセンスとします。
