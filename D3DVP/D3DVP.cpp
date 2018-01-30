@@ -140,7 +140,7 @@ class D3DVP : public GenericVideoFilter
 		NBUF_OUT_TEX = 4
 	};
 
-	int mode, order;
+	int mode, order, nr, edge;
 	std::string deviceName;
 	int resetFrames;
 	int numCache;
@@ -776,11 +776,43 @@ class D3DVP : public GenericVideoFilter
 		}
 	}
 
+	void SetFilter(IScriptEnvironment2* env)
+	{
+		BOOL enableNR = (nr >= 0);
+		BOOL enableEE = (edge >= 0);
+
+		D3D11_VIDEO_PROCESSOR_FILTER_RANGE nrRange, edgeRange;
+		COM_CHECK(videoProcEnum->GetVideoProcessorFilterRange(
+			D3D11_VIDEO_PROCESSOR_FILTER_NOISE_REDUCTION, &nrRange));
+		COM_CHECK(videoProcEnum->GetVideoProcessorFilterRange(
+			D3D11_VIDEO_PROCESSOR_FILTER_EDGE_ENHANCEMENT, &edgeRange));
+
+		printf("NR: [%d,%d,%d,%f]\n", nrRange.Minimum, nrRange.Maximum, nrRange.Default, nrRange.Multiplier);
+		printf("EE: [%d,%d,%d,%f]\n", edgeRange.Minimum, edgeRange.Maximum, edgeRange.Default, edgeRange.Multiplier);
+
+		nr = (int)std::round((double)nr * 0.01 * 
+			(nrRange.Maximum - nrRange.Minimum) + nrRange.Minimum);
+		edge = (int)std::round((double)edge * 0.01 * 
+			(edgeRange.Maximum - edgeRange.Minimum) + edgeRange.Minimum);
+
+		printf("NR: %d %d\n", enableNR, nr);
+		printf("EE: %d %d\n", enableEE, edge);
+
+		videoCtx->VideoProcessorSetStreamFilter(
+			videoProc.get(), 0, D3D11_VIDEO_PROCESSOR_FILTER_NOISE_REDUCTION, enableNR, nr);
+		videoCtx->VideoProcessorSetStreamFilter(
+			videoProc.get(), 0, D3D11_VIDEO_PROCESSOR_FILTER_EDGE_ENHANCEMENT, enableEE, edge);
+	}
+
 public:
-	D3DVP(PClip child, int mode, int order, const std::string& deviceName, int reset, int debug, IScriptEnvironment2* env)
+	D3DVP(PClip child, int mode, int order, int nr, int edge, 
+		const std::string& deviceName, int reset, int debug,
+		IScriptEnvironment2* env)
 		: GenericVideoFilter(child)
 		, mode(mode)
 		, order(order)
+		, nr(nr)
+		, edge(edge)
 		, deviceName(deviceName)
 		, resetFrames(reset)
 		, debug(debug)
@@ -793,12 +825,15 @@ public:
 		, cacheStartFrame(-1)
 		, nextInputFrame(-1)
 	{
-		if (mode != 0 && mode != 1) env->ThrowError("[D3DVP Error] mode should be 0 or 1");
-		if (order < -1 || order > 1) env->ThrowError("[D3DVP Error] invalid order parameter");
-		if (reset < 0) env->ThrowError("[D3DVP Error] invalid reset parameter");
+		if (mode != 0 && mode != 1) env->ThrowError("[D3DVP Error] mode must be 0 or 1");
+		if (order < -1 || order > 1) env->ThrowError("[D3DVP Error] order must be -1 or 0 or 1");
+		if (reset < 0) env->ThrowError("[D3DVP Error] reset must be >= 0");
+		if (nr < -1 || nr > 100) env->ThrowError("D3DVP Error] nr must be in range 0-100 or -1 to disable");
+		if (edge < -1 || edge > 100) env->ThrowError("D3DVP Error] edge must be in range 0-100 or -1 to disable");
 
 		CreateProcessor(env);
 		CreateResources(env);
+		SetFilter(env);
 
 #if COUNT_FRAMES
 		cntTo = 0;
@@ -859,9 +894,11 @@ public:
 			args[0].AsClip(),
 			args[1].AsInt(1),     // mode
 			args[2].AsInt(-1),    // order
-			args[3].AsString(""), // device
-			args[4].AsInt(30),    // reset
-			args[5].AsInt(0),     // debug
+			args[3].AsInt(-1),    // nr
+			args[4].AsInt(-1),    // edge
+			args[5].AsString(""), // device
+			args[6].AsInt(30),    // reset
+			args[7].AsInt(0),     // debug
 			env);
 	}
 };
@@ -880,7 +917,7 @@ extern "C" __declspec(dllexport) const char* __stdcall AvisynthPluginInit3(IScri
 	AVS_linkage = vectors;
 	//init_console();
 
-	env->AddFunction("D3DVP", "c[mode]i[order]i[device]s[reset]i[debug]i", D3DVP::Create, 0);
+	env->AddFunction("D3DVP", "c[mode]i[order]i[nr]i[edge]i[device]s[reset]i[debug]i", D3DVP::Create, 0);
 
 	return "Direct3D VideoProcessing Plugin";
 }
