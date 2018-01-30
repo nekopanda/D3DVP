@@ -32,10 +32,12 @@ D3DVP(clip, int "mode", int "order", int "width", int "height", int "quality", b
 	width:
 		出力画像の幅
 		0の場合はリサイズしない
+		デフォルト: 0
 
 	height:
 		出力画像の高さ
 		0の場合はリサイズしない
+		デフォルト: 0
 
 	quality:
 		品質（ドライバによっては効果がないこともあります）
