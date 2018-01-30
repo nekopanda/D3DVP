@@ -75,8 +75,8 @@ void TestBase::GetFrames(PClip& clip, TEST_FRAMES tf, IScriptEnvironment2* env)
 	int nframes = clip->GetVideoInfo().num_frames;
 	switch (tf) {
 	case TF_MID:
-		for (int i = 0; i < 8; ++i) {
-			clip->GetFrame(100 + i, env);
+		for (int i = 0; i < nframes; ++i) {
+			clip->GetFrame(i, env);
 		}
 		break;
 	case TF_BEGIN:
@@ -139,7 +139,7 @@ int main(int argc, char **argv)
 	::testing::InitGoogleTest(&argc, argv);
 	int result = RUN_ALL_TESTS();
 
-	//getchar();
+	getchar();
 
 	return result;
 }
