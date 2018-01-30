@@ -14,15 +14,19 @@
 #include <D3D11.h>
 #include <comdef.h>
 
+#include <intrin.h>
+
 #include <algorithm>
 #include <vector>
 #include <memory>
+#include <array>
+#include <bitset>
 #include <exception>
 
 #include "Thread.hpp"
 
 #define COUNT_FRAMES 0
-#define PRINT_WAIT false
+#define PRINT_WAIT true
 
 #define COM_CHECK(call) \
 	do { \
@@ -47,6 +51,84 @@ struct ComDeleter {
 };
 template <typename T> using PCom = std::unique_ptr<T, ComDeleter>;
 template <typename T> PCom<T> make_com_ptr(T* p) { return PCom<T>(p); }
+
+void yuv_to_nv12_c(
+	int height, int width,
+	uint8_t* dst, int dstPitch,
+	const uint8_t* srcY, const uint8_t* srcU, const uint8_t* srcV,
+	int pitchY, int pitchUV)
+{
+	int widthUV = width >> 1;
+	int heightUV = height >> 1;
+	int offsetUV = width * height;
+
+	uint8_t* dstY = dst;
+	uint8_t* dstUV = dstY + height * dstPitch;
+
+	for (int y = 0; y < height; ++y) {
+		memcpy(&dstY[y * dstPitch], &srcY[y * pitchY], width);
+	}
+
+	for (int y = 0; y < heightUV; ++y) {
+		for (int x = 0; x < widthUV; ++x) {
+			dstUV[x * 2 + 0 + y * dstPitch] = srcU[x + y * pitchUV];
+			dstUV[x * 2 + 1 + y * dstPitch] = srcV[x + y * pitchUV];
+		}
+	}
+}
+
+void yuv_to_nv12_avx2(
+	int height, int width,
+	uint8_t* dst, int dstPitch,
+	const uint8_t* srcY, const uint8_t* srcU, const uint8_t* srcV,
+	int pitchY, int pitchUV);
+
+void nv12_to_yuv_c(
+	int height, int width,
+	uint8_t* dstY, uint8_t* dstU, uint8_t* dstV,
+	int pitchY, int pitchUV,
+	const uint8_t* src, int srcPitch)
+{
+	int widthUV = width >> 1;
+	int heightUV = height >> 1;
+	int offsetUV = width * height;
+
+	const uint8_t* srcY = src;
+	const uint8_t* srcUV = srcY + height * srcPitch;
+
+	for (int y = 0; y < height; ++y) {
+		memcpy(&dstY[y * pitchY], &srcY[y * srcPitch], width);
+	}
+
+	for (int y = 0; y < heightUV; ++y) {
+		for (int x = 0; x < widthUV; ++x) {
+			dstU[x + y * pitchUV] = srcUV[x * 2 + 0 + y * srcPitch];
+			dstV[x + y * pitchUV] = srcUV[x * 2 + 1 + y * srcPitch];
+		}
+	}
+}
+
+void nv12_to_yuv_avx2(
+	int height, int width,
+	uint8_t* dstY, uint8_t* dstU, uint8_t* dstV,
+	int pitchY, int pitchUV,
+	const uint8_t* src, int srcPitch);
+
+class CPUID {
+	bool avx2Enabled;
+public:
+	CPUID() : avx2Enabled(false) {
+		std::array<int, 4> cpui;
+		__cpuid(cpui.data(), 0);
+		int nIds_ = cpui[0];
+		if (7 <= nIds_) {
+			__cpuidex(cpui.data(), 7, 0);
+			std::bitset<32> f_7_EBX_ = cpui[1];
+			avx2Enabled = f_7_EBX_[5];
+		}
+	}
+	bool AVX2(void) { return avx2Enabled; }
+};
 
 class D3DVP : public GenericVideoFilter
 {
@@ -95,6 +177,18 @@ class D3DVP : public GenericVideoFilter
 	std::vector<ID3D11Texture2D*> inputTexPool;
 	CriticalSection outputTexPoolLock;
 	std::vector<ID3D11Texture2D*> outputTexPool;
+
+	void(*yuv_to_nv12)(
+		int height, int width,
+		uint8_t* dst, int dstPitch,
+		const uint8_t* srcY, const uint8_t* srcU, const uint8_t* srcV,
+		int pitchY, int pitchUV);
+
+	void(*nv12_to_yuv)(
+		int height, int width,
+		uint8_t* dstY, uint8_t* dstU, uint8_t* dstV,
+		int pitchY, int pitchUV,
+		const uint8_t* src, int srcPitch);
 
 	struct FrameHeader {
 		IScriptEnvironment2* env;
@@ -166,66 +260,28 @@ class D3DVP : public GenericVideoFilter
 		return NBUF_IN_FRAME + NBUF_IN_TEX + (NBUF_OUT_TEX / NumFramesPerBlock()) + rccaps.FutureFrames;
 	}
 
-	template <typename pixel_t>
 	void toNV12(PVideoFrame& src, D3D11_MAPPED_SUBRESOURCE dst)
 	{
 		const pixel_t* srcY = reinterpret_cast<const pixel_t*>(src->GetReadPtr(PLANAR_Y));
 		const pixel_t* srcU = reinterpret_cast<const pixel_t*>(src->GetReadPtr(PLANAR_U));
 		const pixel_t* srcV = reinterpret_cast<const pixel_t*>(src->GetReadPtr(PLANAR_V));
-
 		int pitchY = src->GetPitch(PLANAR_Y) / sizeof(pixel_t);
 		int pitchUV = src->GetPitch(PLANAR_U) / sizeof(pixel_t);
-		int widthUV = vi.width >> logUVx;
-		int heightUV = vi.height >> logUVy;
-		int offsetUV = vi.width * vi.height;
 		int dstPitch = dst.RowPitch / sizeof(pixel_t);
-
 		pixel_t* dstY = reinterpret_cast<pixel_t*>(dst.pData);
-		pixel_t* dstUV = dstY + vi.height * dstPitch;
-
-		for (int y = 0; y < vi.height; ++y) {
-			for (int x = 0; x < vi.width; ++x) {
-				dstY[x + y * dstPitch] = srcY[x + y * pitchY];
-			}
-		}
-
-		for (int y = 0; y < heightUV; ++y) {
-			for (int x = 0; x < widthUV; ++x) {
-				dstUV[x * 2 + 0 + y * dstPitch] = srcU[x + y * pitchUV];
-				dstUV[x * 2 + 1 + y * dstPitch] = srcV[x + y * pitchUV];
-			}
-		}
+		yuv_to_nv12(vi.height, vi.width, dstY, dstPitch, srcY, srcU, srcV, pitchY, pitchUV);
 	}
 
-	template <typename pixel_t>
 	void fromNV12(PVideoFrame& dst, D3D11_MAPPED_SUBRESOURCE src)
 	{
 		pixel_t* dstY = reinterpret_cast<pixel_t*>(dst->GetWritePtr(PLANAR_Y));
 		pixel_t* dstU = reinterpret_cast<pixel_t*>(dst->GetWritePtr(PLANAR_U));
 		pixel_t* dstV = reinterpret_cast<pixel_t*>(dst->GetWritePtr(PLANAR_V));
-
 		int pitchY = dst->GetPitch(PLANAR_Y) / sizeof(pixel_t);
 		int pitchUV = dst->GetPitch(PLANAR_U) / sizeof(pixel_t);
-		int widthUV = vi.width >> logUVx;
-		int heightUV = vi.height >> logUVy;
-		int offsetUV = vi.width * vi.height;
 		int srcPitch = src.RowPitch / sizeof(pixel_t);
-
-		pixel_t* srcY = reinterpret_cast<pixel_t*>(src.pData);
-		pixel_t* srcUV = srcY + vi.height * srcPitch;
-
-		for (int y = 0; y < vi.height; ++y) {
-			for (int x = 0; x < vi.width; ++x) {
-				dstY[x + y * pitchY] = srcY[x + y * srcPitch];
-			}
-		}
-
-		for (int y = 0; y < heightUV; ++y) {
-			for (int x = 0; x < widthUV; ++x) {
-				dstU[x + y * pitchUV] = srcUV[x * 2 + 0 + y * srcPitch];
-				dstV[x + y * pitchUV] = srcUV[x * 2 + 1 + y * srcPitch];
-			}
-		}
+		const pixel_t* srcY = reinterpret_cast<const pixel_t*>(src.pData);
+		nv12_to_yuv(vi.height, vi.width, dstY, dstU, dstV, pitchY, pitchUV, srcY, srcPitch);
 	}
 
 #if COUNT_FRAMES
@@ -250,7 +306,7 @@ class D3DVP : public GenericVideoFilter
 					auto& lock = with(deviceLock);
 					COM_CHECK(devCtx->Map(out.data, 0, D3D11_MAP_WRITE, 0, &res));
 				}
-				toNV12<pixel_t>(data.data, res);
+				toNV12(data.data, res);
 #if COUNT_FRAMES
 				++cntTo;
 #endif
@@ -412,7 +468,7 @@ class D3DVP : public GenericVideoFilter
 					auto& lock = with(deviceLock);
 					COM_CHECK(devCtx->Map(data.data, 0, D3D11_MAP_READ, 0, &res));
 				}
-				fromNV12<pixel_t>(out.data, res);
+				fromNV12(out.data, res);
 #if COUNT_FRAMES
 				++cntFrom;
 #endif
@@ -470,7 +526,6 @@ class D3DVP : public GenericVideoFilter
 	}
 
 	PVideoFrame WaitFrame(int n, IScriptEnvironment2* env) {
-		//Sleep(1000000);
 		while (true) {
 			auto& lock = with(receiveLock);
 			int idx = n - receiveQ.front().n;
@@ -757,6 +812,15 @@ public:
 
 		vi.MulDivFPS(NumFramesPerBlock(), 1);
 		vi.num_frames *= NumFramesPerBlock();
+
+		if (CPUID().AVX2()) {
+			yuv_to_nv12 = yuv_to_nv12_avx2;
+			nv12_to_yuv = nv12_to_yuv_avx2;
+		}
+		else {
+			yuv_to_nv12 = yuv_to_nv12_c;
+			nv12_to_yuv = nv12_to_yuv_c;
+		}
 
 		toNV12Thread.start();
 		processThread.start();
