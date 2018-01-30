@@ -74,6 +74,8 @@ D3DVP(clip, int "mode", int "order", int "quality", bool "autop",
 
 ## 制限
 
+フォーマットは8bitYUV420のみ対応
+
 処理は完全にドライバ依存なので、
 PCのグラフィックス設定や、GPUに種類によって
 画質が変わる可能性があります。
