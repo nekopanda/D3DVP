@@ -2,7 +2,7 @@
 Direct3D 11 Video Processing Avisynth Filter
 
 Direct3D 11 の Video API を使ったインタレ解除フィルタです。
-お持ちのGPUのドライバがちゃんと実装されていれば、GPUでインタレ解除されます。
+お持ちのGPUのドライバがちゃんと実装されていれば、GPUでインタレ解除できます。
 
 ## [ダウンロードはこちらから](https://github.com/nekopanda/D3DVP/releases)
 
