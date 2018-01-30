@@ -35,6 +35,7 @@
 
 // Functions and macros to help work with alignment requirements.
 
+
 // Tells if a number is a power of two.
 #define IS_POWER2(n) ((n) && !((n) & ((n) - 1)))
 
@@ -51,16 +52,6 @@
 
 #include <cassert>
 #include <cstdlib>
-#include <cstdint>
-#include <avs/config.h>
-
-#if defined(MSVC)
-    // needed for VS2013, otherwise C++11 'alignas' works
-    #define avs_alignas(x) __declspec(align(x))
-#else
-    // assumes C++11 support
-    #define avs_alignas(x) alignas(x)
-#endif
 
 template<typename T>
 static bool IsPtrAligned(T* ptr, size_t align)
@@ -97,13 +88,13 @@ inline void* avs_malloc(size_t nbytes, size_t align)
 {
   if (!IS_POWER2(align))
     return NULL;
-
+  
   size_t offset = sizeof(void*) + align - 1;
-
+  
   void *orig = malloc(nbytes + offset);
   if (orig == NULL)
    return NULL;
-
+   
   void **aligned = (void**)(((uintptr_t)orig + (uintptr_t)offset) & (~(uintptr_t)(align-1)));
   aligned[-1] = orig;
   return aligned;
@@ -116,7 +107,7 @@ inline void avs_free(void *ptr)
   // Mirroring free()'s semantic requires us to accept NULLs
   if (ptr == NULL)
     return;
-
+    
   free(((void**)ptr)[-1]);
 }
 

@@ -28,7 +28,11 @@
 #define COUNT_FRAMES 0
 #define PRINT_WAIT true
 
+#if 0 // デバッグ用（本番はOFFにする）
 #define PRINTF(...) fprintf(stderr, __VA_ARGS__)
+#else
+#define PRINTF(...)
+#endif
 
 #define COM_CHECK(call) \
 	do { \
@@ -41,9 +45,7 @@
 		} while (0)
 
 void OnComError(HRESULT hr) {
-#if 1 // デバッグ用（本番は取り除く）
 	PRINTF("[COM Error] %s (code: %d)\n", _com_error(hr).ErrorMessage(), hr);
-#endif
 }
 
 struct ComDeleter {
