@@ -13,7 +13,7 @@ Direct3D 11 の Video API を使ったインタレ解除フィルタです。
 
 ## 関数
 
-D3DVP(clip, int "mode", int "order", int "quality", bool "autop",
+D3DVP(clip, int "mode", int "order", int "width", int "height", int "quality", bool "autop",
 		int "nr", int "edge", string "device", int "reset", int "debug")
 
 	mode:
@@ -28,6 +28,14 @@ D3DVP(clip, int "mode", int "order", int "quality", bool "autop",
 		-  0: bottom field first (bff)
 		-  1: top field first (tff)
 		デフォルト: -1
+
+	width:
+		出力画像の幅
+		0の場合はリサイズしない
+
+	height:
+		出力画像の高さ
+		0の場合はリサイズしない
 
 	quality:
 		品質（ドライバによっては効果がないこともあります）
@@ -81,6 +89,13 @@ PCのグラフィックス設定や、GPUに種類によって
 画質が変わる可能性があります。
 
 ## サンプルスクリプト
+
+```
+# 普通にインタレ解除
+srcfile="..."
+LWLibavVideoSource(srcfile)
+D3DVP()
+```
 
 ```
 # IntelとNVIDIAとRadeonのインタレ解除を比較
