@@ -6,6 +6,9 @@ MinimumVisualStudioVersion = 10.0.40219.1
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "D3DVP", "D3DVP\D3DVP.vcxproj", "{93C68D7F-7CAC-40F2-B2B6-F48B961C8526}"
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "D3DVPTest", "D3DVPTest\D3DVPTest.vcxproj", "{9523DF0B-371E-4C95-B1A9-32CA10E6487A}"
+	ProjectSection(ProjectDependencies) = postProject
+		{93C68D7F-7CAC-40F2-B2B6-F48B961C8526} = {93C68D7F-7CAC-40F2-B2B6-F48B961C8526}
+	EndProjectSection
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution

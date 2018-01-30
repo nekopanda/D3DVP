@@ -2,6 +2,8 @@
 #define _CRT_SECURE_NO_WARNINGS
 
 #include <Windows.h>
+#undef max
+#undef min
 
 #define AVS_LINKAGE_DLLIMPORT
 #include "avisynth.h"
@@ -12,6 +14,7 @@
 #include <fstream>
 #include <string>
 #include <memory>
+#include <algorithm>
 
 std::string GetDirectoryName(const std::string& filename)
 {
@@ -75,7 +78,7 @@ void TestBase::GetFrames(PClip& clip, TEST_FRAMES tf, IScriptEnvironment2* env)
 	int nframes = clip->GetVideoInfo().num_frames;
 	switch (tf) {
 	case TF_MID:
-		for (int i = 0; i < nframes; ++i) {
+		for (int i = 0; i < std::min(1000, nframes); ++i) {
 			clip->GetFrame(i, env);
 		}
 		break;
@@ -113,7 +116,7 @@ void TestBase::DeintTest(TEST_FRAMES tf)
 		std::ofstream out(scriptpath);
 
 		out << "src = LWLibavVideoSource(\"test.ts\")" << std::endl;
-		out << "src.D3DVP()" << std::endl;
+		out << "src.D3DVP(device=\"Intel\")" << std::endl;
 
 		out.close();
 
