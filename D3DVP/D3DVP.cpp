@@ -151,6 +151,8 @@ class D3DVP : public GenericVideoFilter
 	int numCache;
 	int debug;
 
+	VideoInfo srcvi;
+
 	int logUVx;
 	int logUVy;
 
@@ -253,7 +255,7 @@ class D3DVP : public GenericVideoFilter
 	FromNV12Thread fromNV12Thread;
 
 	PVideoFrame GetChildFrame(int n, IScriptEnvironment2* env) {
-		n = std::max(0, std::min(vi.num_frames - 1, n));
+		n = std::max(0, std::min(srcvi.num_frames - 1, n));
 		return child->GetFrame(n, env);
 	}
 
@@ -275,7 +277,7 @@ class D3DVP : public GenericVideoFilter
 		int pitchUV = src->GetPitch(PLANAR_U) / sizeof(pixel_t);
 		int dstPitch = dst.RowPitch / sizeof(pixel_t);
 		pixel_t* dstY = reinterpret_cast<pixel_t*>(dst.pData);
-		yuv_to_nv12(vi.height, vi.width, dstY, dstPitch, srcY, srcU, srcV, pitchY, pitchUV);
+		yuv_to_nv12(srcvi.height, srcvi.width, dstY, dstPitch, srcY, srcU, srcV, pitchY, pitchUV);
 	}
 
 	void fromNV12(PVideoFrame& dst, D3D11_MAPPED_SUBRESOURCE src)
@@ -368,7 +370,6 @@ class D3DVP : public GenericVideoFilter
 						texInput[inputTexQueue.back()].get(), 0, 0, 0, 0, data.data, 0, NULL);
 				}
 
-				int numInputTex = rccaps.FutureFrames + rccaps.PastFrames + 1;
 				if (inputTexQueue.size() == texInput.size()) {
 					// 必要フレームが集まった
 
@@ -520,7 +521,7 @@ class D3DVP : public GenericVideoFilter
 			cacheStartFrame = nextInputFrame * numFields;
 			inputStart = nextInputFrame - rccaps.PastFrames;
 		}
-		nextInputFrame = nsrc + procAhead;
+		nextInputFrame = std::max(nextInputFrame, nsrc + procAhead);
 		for (int i = inputStart; i < nextInputFrame; ++i, reset = false) {
 			FrameData<PVideoFrame> data;
 			data.env = env;
@@ -535,20 +536,20 @@ class D3DVP : public GenericVideoFilter
 		while (true) {
 			auto& lock = with(receiveLock);
 			int idx = n - receiveQ.front().n;
-			if (idx < receiveQ.size()) {
+			if (idx < (int)receiveQ.size()) {
 				auto data = receiveQ[idx];
+				if (data.exception) {
+					std::rethrow_exception(data.exception);
+				}
 				if (data.n != n) {
 					env->ThrowError("[D3DVP Error] frame number unmatch 1");
 				}
-				while (numCache < receiveQ.size()) {
+				while (numCache < (int)receiveQ.size()) {
 					if (receiveQ.front().n != cacheStartFrame) {
 						env->ThrowError("[D3DVP Error] frame number unmatch 2");
 					}
 					receiveQ.pop_front();
 					++cacheStartFrame;
-				}
-				if (data.exception) {
-					std::rethrow_exception(data.exception);
 				}
 				return data.data;
 			}
@@ -631,11 +632,11 @@ class D3DVP : public GenericVideoFilter
 			vdesc.InputFrameFormat = parity
 				? D3D11_VIDEO_FRAME_FORMAT_INTERLACED_TOP_FIELD_FIRST
 				: D3D11_VIDEO_FRAME_FORMAT_INTERLACED_BOTTOM_FIELD_FIRST;
-			vdesc.InputFrameRate.Numerator = vi.fps_numerator;
-			vdesc.InputFrameRate.Denominator = vi.fps_denominator;
-			vdesc.InputHeight = vi.height;
-			vdesc.InputWidth = vi.width;
-			vdesc.OutputFrameRate.Numerator = vi.fps_numerator * (bob ? 2 : 1);
+			vdesc.InputFrameRate.Numerator = srcvi.fps_numerator;
+			vdesc.InputFrameRate.Denominator = srcvi.fps_denominator;
+			vdesc.InputHeight = srcvi.height;
+			vdesc.InputWidth = srcvi.width;
+			vdesc.OutputFrameRate.Numerator = vi.fps_numerator;
 			vdesc.OutputFrameRate.Denominator = vi.fps_denominator;
 			vdesc.OutputHeight = vi.height;
 			vdesc.OutputWidth = vi.width;
@@ -715,8 +716,8 @@ class D3DVP : public GenericVideoFilter
 		PRINTF("[D3DVP] PastFrames: %d, FutureFrames: %d\n", rccaps.PastFrames, rccaps.FutureFrames);
 
 		D3D11_TEXTURE2D_DESC desc = {};
-		desc.Width = vi.width;
-		desc.Height = vi.height;
+		desc.Width = srcvi.width;
+		desc.Height = srcvi.height;
 		desc.MipLevels = 1;
 		desc.ArraySize = 1;
 		desc.Format = DXGI_FORMAT_NV12;
@@ -739,6 +740,8 @@ class D3DVP : public GenericVideoFilter
 		}
 
 		// 出力用テクスチャ
+		desc.Width = vi.width;
+		desc.Height = vi.height;
 		// output must be D3D11_BIND_RENDER_TARGET
 		desc.BindFlags = D3D11_BIND_RENDER_TARGET;
 
@@ -750,6 +753,8 @@ class D3DVP : public GenericVideoFilter
 		}
 
 		// 入力用CPUテクスチャ
+		desc.Width = srcvi.width;
+		desc.Height = srcvi.height;
 		desc.Usage = D3D11_USAGE_STAGING;
 		desc.BindFlags = 0;
 		desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -763,6 +768,8 @@ class D3DVP : public GenericVideoFilter
 		}
 
 		// 出力用CPUテクスチャ
+		desc.Width = vi.width;
+		desc.Height = vi.height;
 		desc.Usage = D3D11_USAGE_STAGING;
 		desc.BindFlags = 0;
 		desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
@@ -830,8 +837,8 @@ class D3DVP : public GenericVideoFilter
 	}
 
 public:
-	D3DVP(PClip child, int mode, int order, int quality, bool autop, int nr, int edge,
-		const std::string& deviceName, int reset, int debug,
+	D3DVP(PClip child, int mode, int order, int width, int height, int quality, 
+		bool autop, int nr, int edge, const std::string& deviceName, int reset, int debug,
 		IScriptEnvironment2* env)
 		: GenericVideoFilter(child)
 		, mode(mode)
@@ -843,8 +850,9 @@ public:
 		, deviceName(deviceName)
 		, resetFrames(reset)
 		, debug(debug)
-		, logUVx(vi.GetPlaneWidthSubsampling(PLANAR_U))
-		, logUVy(vi.GetPlaneHeightSubsampling(PLANAR_U))
+		, srcvi(vi)
+		, logUVx(srcvi.GetPlaneWidthSubsampling(PLANAR_U))
+		, logUVy(srcvi.GetPlaneHeightSubsampling(PLANAR_U))
 		, toNV12Thread(this, env)
 		, processThread(this, env)
 		, fromNV12Thread(this, env)
@@ -859,6 +867,11 @@ public:
 		if (nr < -1 || nr > 100) env->ThrowError("D3DVP Error] nr must be in range 0-100, or -1 to disable");
 		if (edge < -1 || edge > 100) env->ThrowError("D3DVP Error] edge must be in range 0-100, or -1 to disable");
 
+		vi.MulDivFPS(NumFramesPerBlock(), 1);
+		vi.num_frames *= NumFramesPerBlock();
+		vi.width = (width > 0) ? width : vi.width;
+		vi.height = (height > 0) ? height : vi.height;
+
 		CreateProcessor(env);
 		CreateResources(env);
 		SetFilter(env);
@@ -872,9 +885,6 @@ public:
 #endif
 
 		numCache = std::max(NumFramesProcAhead() * NumFramesPerBlock(), 15);
-
-		vi.MulDivFPS(NumFramesPerBlock(), 1);
-		vi.num_frames *= NumFramesPerBlock();
 
 		if (CPUID().AVX2()) {
 			yuv_to_nv12 = yuv_to_nv12_avx2;
@@ -915,6 +925,12 @@ public:
 		return WaitFrame(n, env);
 	}
 
+	int __stdcall SetCacheHints(int cachehints, int frame_range)
+	{
+		if (cachehints == CACHE_GET_MTMODE) return MT_SERIALIZED;
+		return 0;
+	}
+
 	static AVSValue __cdecl Create(AVSValue args, void* user_data, IScriptEnvironment* env_)
 	{
 		IScriptEnvironment2* env = static_cast<IScriptEnvironment2*>(env_);
@@ -922,32 +938,26 @@ public:
 			args[0].AsClip(),
 			args[1].AsInt(1),     // mode
 			args[2].AsInt(-1),    // order
-			args[3].AsInt(2),     // quality
-			args[4].AsBool(false),// autop
-			args[5].AsInt(-1),    // nr
-			args[6].AsInt(-1),    // edge
-			args[7].AsString(""), // device
-			args[8].AsInt(30),    // reset
-			args[9].AsInt(0),     // debug
+			args[3].AsInt(0),     // width
+			args[4].AsInt(0),     // height
+			args[5].AsInt(2),     // quality
+			args[6].AsBool(false),// autop
+			args[7].AsInt(-1),    // nr
+			args[8].AsInt(-1),    // edge
+			args[9].AsString(""), // device
+			args[10].AsInt(30),   // reset
+			args[11].AsInt(0),    // debug
 			env);
 	}
 };
-
-static void init_console()
-{
-	AllocConsole();
-	freopen("CONOUT$", "w", stdout);
-	freopen("CONIN$", "r", stdin);
-}
 
 const AVS_Linkage *AVS_linkage = 0;
 
 extern "C" __declspec(dllexport) const char* __stdcall AvisynthPluginInit3(IScriptEnvironment* env, const AVS_Linkage* const vectors)
 {
 	AVS_linkage = vectors;
-	//init_console();
 
-	env->AddFunction("D3DVP", "c[mode]i[order]i[quality]i[autop]b[nr]i[edge]i[device]s[reset]i[debug]i", D3DVP::Create, 0);
+	env->AddFunction("D3DVP", "c[mode]i[order]i[width]i[height]i[quality]i[autop]b[nr]i[edge]i[device]s[reset]i[debug]i", D3DVP::Create, 0);
 
 	return "Direct3D VideoProcessing Plugin";
 }
