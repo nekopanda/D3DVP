@@ -3,8 +3,6 @@
 #include <Windows.h>
 #include <process.h>
 
-#include <avisynth.h>
-
 #include <deque>
 
 // コピー禁止オブジェクト
@@ -124,12 +122,13 @@ public:
 // スレッドはstart()で開始（コンストラクタから仮想関数を呼ぶことはできないため）
 // run()は派生クラスで実装されているのでrun()が終了する前に派生クラスのデストラクタが終了しないように注意！
 // 安全のためjoin()が完了していない状態でThreadBaseのデストラクタに入るとエラーとする
+template <typename ErrorHandler>
 class ThreadBase
 {
 public:
-	IScriptEnvironment2* env;
+	ErrorHandler* env;
 
-	ThreadBase(IScriptEnvironment2* env) : env(env), thread_handle_(NULL) { }
+	ThreadBase(ErrorHandler* env) : env(env), thread_handle_(NULL) { }
 	~ThreadBase() {
 		if (thread_handle_ != NULL) {
 			env->ThrowError("finish join() before destroy object ...");
@@ -170,11 +169,11 @@ private:
 	}
 };
 
-template <typename T, bool PERF = false>
-class DataPumpThread : private ThreadBase
+template <typename T, typename ErrorHandler, bool PERF = false>
+class DataPumpThread : private ThreadBase<ErrorHandler>
 {
 public:
-	DataPumpThread(size_t maximum, IScriptEnvironment2* env)
+	DataPumpThread(size_t maximum, ErrorHandler* env)
 		: ThreadBase(env)
 		, maximum_(maximum)
 		, current_(0)

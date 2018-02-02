@@ -119,7 +119,6 @@ void TestBase::DeintTest(TEST_FRAMES tf)
 		out << "src.D3DVP(device=\"Intel\")" << std::endl;
 
 		out.close();
-
 		{
 			PClip clip = env->Invoke("Import", scriptpath.c_str()).AsClip();
 			GetFrames(clip, tf, env.get());

@@ -1,0 +1,6 @@
+LIBRARY D3DVP
+
+EXPORTS
+	AvisynthPluginInit3
+	GetFilterTable
+

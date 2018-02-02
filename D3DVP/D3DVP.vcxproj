@@ -101,7 +101,11 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalDependencies>DXGI.lib;D3D11.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <ModuleDefinitionFile>D3DVP.def</ModuleDefinitionFile>
     </Link>
+    <PostBuildEvent>
+      <Command>copy "$(OutDir)$(ProjectName).dll" "$(OutDir)$(ProjectName).auf"</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
@@ -115,7 +119,11 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalDependencies>DXGI.lib;D3D11.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <ModuleDefinitionFile>D3DVP.def</ModuleDefinitionFile>
     </Link>
+    <PostBuildEvent>
+      <Command>copy "$(OutDir)$(ProjectName).dll" "$(OutDir)$(ProjectName).auf"</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <ClCompile>
@@ -133,7 +141,11 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalDependencies>DXGI.lib;D3D11.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <ModuleDefinitionFile>D3DVP.def</ModuleDefinitionFile>
     </Link>
+    <PostBuildEvent>
+      <Command>copy "$(OutDir)$(ProjectName).dll" "$(OutDir)$(ProjectName).auf"</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -151,7 +163,11 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalDependencies>DXGI.lib;D3D11.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <ModuleDefinitionFile>D3DVP.def</ModuleDefinitionFile>
     </Link>
+    <PostBuildEvent>
+      <Command>copy "$(OutDir)$(ProjectName).dll" "$(OutDir)$(ProjectName).auf"</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="convert_avx2.cpp">
@@ -164,6 +180,9 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Thread.hpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="D3DVP.def" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
