@@ -1204,7 +1204,7 @@ FILTER_DLL filter = {
 															NULL,NULL,					//	システムで使いますので使用しないでください
 															NULL,						//  拡張データ領域へのポインタ (FILTER_FLAG_EX_DATAが立っている時に有効)
 															NULL,						//  拡張データサイズ (FILTER_FLAG_EX_DATAが立っている時に有効)
-															"Direct3D 11 インタレース解除フィルタ",
+															"Direct3D 11 インタレース解除フィルタ ver0.2.0",
 															//  フィルタ情報へのポインタ (FILTER_FLAG_EX_INFORMATIONが立っている時に有効)
 															func_save_start,						//	セーブが開始される直前に呼ばれる関数へのポインタ (NULLなら呼ばれません)
 															func_save_end,						//	セーブが終了した直前に呼ばれる関数へのポインタ (NULLなら呼ばれません)

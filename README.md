@@ -1,20 +1,26 @@
 # D3DVP
-Direct3D 11 Video Processing Avisynth Filter
+Direct3D 11 Video Processing Avisynth/AviUtl Filter
 
 Direct3D 11 の Video API を使ったインタレ解除フィルタです。
 お持ちのGPUのドライバがちゃんと実装されていれば、GPUでインタレ解除できます。
 
 ## [ダウンロードはこちらから](https://github.com/nekopanda/D3DVP/releases)
 
+# Avisynth版
+
 ## 動作環境
 
-- Windows 8以降
+- **Windows 8以降**
 - Avisynth 2.6以降？（AvisynthPlus CUDAでしか試してないから不明）
+
+## インストール
+
+D3DVP.dllをプラグインフォルダ（plugins+/plugins64+)にコピーしてください。
 
 ## 関数
 
 D3DVP(clip, int "mode", int "order", int "width", int "height", int "quality", bool "autop",
-		int "nr", int "edge", string "device", int "reset", int "debug")
+		int "nr", int "edge", string "device", int "cache", int "reset", int "debug")
 
 	mode:
 		インタレ解除モード
@@ -68,13 +74,21 @@ D3DVP(clip, int "mode", int "order", int "width", int "height", int "quality", b
 		例) "Intel", "NVIDIA", "Radeon"
 		デフォルト: ""（指定なし）
 
+	cache:
+		シーク時に処理してキャッシュする前方フレームの数です。
+		小さくするとシークが高速になる反面、
+		時間軸逆方向へフレームを進めるのが遅くなります。
+		大きくするとこの逆になります。
+		デフォルト: 15
+
 	reset:
-		初期化時やシーク時に読み込ませるフレーム数です。
+		初期化時やシーク時に捨てるフレーム数です。
+		特に問題がなければデフォルト値でOK
 		ドライバによってステートを持っていることがあるので、
-		シーク時におかしくならないように、シーク時に
-		ある程度、シーク位置前方のフレームを読み込ませます。
+		シーク直後は正しい結果が出てこないことがあるので
+		処理結果を数フレームスキップします。
 		その枚数の指定です。
-		デフォルト: 30
+		デフォルト: 4
 
 	debug:
 		デバッグ用です。
@@ -116,6 +130,48 @@ LWLibavVideoSource(srcfile)
 D3DVP(width=1280,height=720)
 ```
 
-## ライセンス
+# AviUtl版
+
+## 動作環境
+
+- **Windows 8以降**
+
+## インストール
+
+D3DVP.aufをコピーしてください。「Direct3D 11インタレ解除」フィルタが追加されます。
+
+※D3DVP.aufはD3DVP.dllをリネームしただけで中身は同じです。
+
+## パラメータ
+
+*  品質（ドライバによっては効果がないこともあります）
+   * 0: 速度重視
+   * 1: ふつう
+   * 2: 品質重視
+
+* 幅、高さ
+   * 「リサイズ」にチェックした場合のみ有効
+
+* NR
+   * ノイズ除去の強度。「ノイズ除去」にチェックした場合のみ有効
+
+* EDGE
+   * エッジ強調の強度。「エッジ強調」にチェックした場合のみ有効
+
+* 2倍fps化
+   * bobでインタレ解除します。
+   * AviUtlはフィルタがfpsを変更することはできないため、動画は2倍のFPSで読み込ませておいてください。ソースが29.97fpsの場合は、59.94fpsで読み込んでください。「60fps読み込み」や「60fps」ではありません。60fpsで読み込むとインタレ縞が残ることがあります。
+
+* YUV420で処理
+   * 通常はYUY2で処理しますが、一部YUY2での処理に対応していないドライバがあるため、その場合はこれにチェックしてYUV420で処理してください。
+
+* 使用GPU
+   * 使用するGPUの指定です。指定がない場合は一番上のGPUを使います。
+
+## AviUtl版の制限
+
+AviUtlの制限から、処理速度はAviSynth版より遅くなります。AviSynth版の半分以下くらいです。
+
+# ライセンス
 
 D3DVPのソースコードはMITライセンスとします。
