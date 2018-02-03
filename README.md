@@ -17,6 +17,8 @@ Direct3D 11 の Video API を使ったインタレ解除フィルタです。
 
 D3DVP.dllをプラグインフォルダ（plugins+/plugins64+)にコピーしてください。
 
+※[Visual Studio 2015ランタイム](https://www.microsoft.com/ja-jp/download/details.aspx?id=48145)に依存しています。インストールしていない場合は、インストールしてください。
+
 ## 関数
 
 D3DVP(clip, int "mode", int "order", int "width", int "height", int "quality", bool "autop",
@@ -141,6 +143,7 @@ D3DVP(width=1280,height=720)
 D3DVP.aufをコピーしてください。「Direct3D 11インタレ解除」フィルタが追加されます。
 
 ※D3DVP.aufはD3DVP.dllをリネームしただけで中身は同じです。
+※[Visual Studio 2015ランタイム](https://www.microsoft.com/ja-jp/download/details.aspx?id=48145)に依存しています。インストールしていない場合は、インストールしてください。
 
 ## パラメータ
 
@@ -161,6 +164,8 @@ D3DVP.aufをコピーしてください。「Direct3D 11インタレ解除」フ
 * 2倍fps化
    * bobでインタレ解除します。
    * AviUtlはフィルタがfpsを変更することはできないため、動画は2倍のFPSで読み込ませておいてください。ソースが29.97fpsの場合は、59.94fpsで読み込んでください。「60fps読み込み」や「60fps」ではありません。60fpsで読み込むとインタレ縞が残ることがあります。
+   
+<img src="https://i.imgur.com/GHafaMe.png" alt="59.94fpsを選択" title="読み込み" width=313>
 
 * YUV420で処理
    * 通常はYUY2で処理しますが、一部YUY2での処理に対応していないドライバがあるため、その場合はこれにチェックしてYUV420で処理してください。
