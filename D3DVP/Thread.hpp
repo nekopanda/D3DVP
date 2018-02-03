@@ -215,6 +215,8 @@ public:
 			cond_empty_.signal();
 		}
 		ThreadBase::join();
+		data_.clear();
+		current_ = 0;
 	}
 
 	bool isRunning() { return ThreadBase::isRunning(); }

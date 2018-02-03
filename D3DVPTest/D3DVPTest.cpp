@@ -132,7 +132,7 @@ void TestBase::DeintTest(TEST_FRAMES tf)
 
 TEST_F(TestBase, DeintTest_)
 {
-	DeintTest(TF_MID);
+	DeintTest(TF_BEGIN);
 }
 
 int main(int argc, char **argv)

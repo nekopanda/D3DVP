@@ -161,12 +161,12 @@ public:
 };
 
 // 処理の共通部分を実装したクラス
-template <typename OUT_FRAME, typename ErrorHandler>
+template <typename FrameType, typename ErrorHandler>
 class D3DVP
 {
 protected:
 	enum {
-		NBUF_IN_FRAME = 2,
+		NBUF_IN_FRAME = 4,
 		NBUF_IN_TEX = 4,
 		NBUF_OUT_TEX = 4,
 
@@ -176,13 +176,13 @@ protected:
 	DXGI_FORMAT format;
 	int mode, tff, quality;
 	std::string deviceName;
+	int cacheFrames;
 	int resetFrames;
 	int numCache;
 	int debug;
 
-	VideoInfo srcvi;
-
-	int width, height;
+	VideoInfo srcvi;   // 入力フォーマット
+	int width, height; // 出力サイズ
 
 	PCom<ID3D11Device> dev;
 	PCom<ID3D11DeviceContext> devCtx;
@@ -227,6 +227,19 @@ protected:
 		T data;
 	};
 
+	class ToNV12Thread : public DataPumpThread<FrameData<FrameType>, ErrorHandler, PRINT_WAIT> {
+	public:
+		ToNV12Thread(D3DVP* this_, ErrorHandler* env)
+			: DataPumpThread(NBUF_IN_FRAME - 2, env)
+			, this_(this_) { }
+	protected:
+		virtual void OnDataReceived(FrameData<FrameType>&& data) {
+			this_->toNV12Received(std::move(data));
+		}
+	private:
+		D3DVP* this_;
+	};
+
 	class ProcessThread : public DataPumpThread<FrameData<ID3D11Texture2D*>, ErrorHandler, PRINT_WAIT> {
 	public:
 		ProcessThread(D3DVP* this_, ErrorHandler* env)
@@ -240,14 +253,67 @@ protected:
 		D3DVP* this_;
 	};
 
-	ProcessThread processThread;
+	class FromNV12Thread : public DataPumpThread<FrameData<ID3D11Texture2D*>, ErrorHandler, PRINT_WAIT> {
+	public:
+		FromNV12Thread(D3DVP* this_, ErrorHandler* env)
+			: DataPumpThread(NBUF_OUT_TEX - 2, env)
+			, this_(this_) { }
+	protected:
+		virtual void OnDataReceived(FrameData<ID3D11Texture2D*>&& data) {
+			this_->fromNV12Received(std::move(data));
+		}
+	private:
+		D3DVP* this_;
+	};
 
-	virtual void InputFrame(int n, bool reset, ErrorHandler* env) = 0;
-	virtual void OutputFrame(FrameData<ID3D11Texture2D*>& data) = 0;
+	bool joinCalled;
+	ToNV12Thread toGPUThread;
+	ProcessThread processThread;
+	FromNV12Thread fromGPUThread;
+
+	virtual FrameType GetChildFrame(int n, ErrorHandler* env) = 0;
+	virtual FrameType NewVideoFrame(ErrorHandler* env) = 0;
+	virtual void ToGPUFrame(FrameType& frame, D3D11_MAPPED_SUBRESOURCE res, ErrorHandler* env) = 0;
+	virtual void FromGPUFrame(FrameType& frame, D3D11_MAPPED_SUBRESOURCE res, ErrorHandler* env) = 0;
 
 #if COUNT_FRAMES
 	int cntTo, cntReset, cntRecv, cntProc, cntFrom;
 #endif
+
+	void toNV12Received(FrameData<FrameType>&& data) {
+		auto env = data.env;
+		FrameData<ID3D11Texture2D*> out = static_cast<FrameHeader>(data);
+		out.data = nullptr;
+
+		if (data.exception == nullptr) {
+			try {
+				{
+					auto& lock = with(inputTexPoolLock);
+					out.data = inputTexPool.back();
+					inputTexPool.pop_back();
+				}
+
+				D3D11_MAPPED_SUBRESOURCE res;
+				{
+					auto& lock = with(deviceLock);
+					COM_CHECK(devCtx->Map(out.data, 0, D3D11_MAP_WRITE, 0, &res));
+				}
+				ToGPUFrame(data.data, res, env);
+#if COUNT_FRAMES
+				++cntTo;
+#endif
+				{
+					auto& lock = with(deviceLock);
+					devCtx->Unmap(out.data, 0);
+				}
+			}
+			catch (...) {
+				out.exception = std::current_exception();
+			}
+		}
+
+		processThread.put(std::move(out));
+	}
 
 	// processReceived用データ
 	std::deque<int> inputTexQueue;
@@ -336,17 +402,9 @@ protected:
 						}
 						{
 							auto& lock = with(outputTexPoolLock);
-							if (outputTexPool.size() > 0) {
 								out.data = outputTexPool.back();
 								outputTexPool.pop_back();
 							}
-						}
-						if (out.data == nullptr) {
-							// 無かったら新しく確保
-							auto& lock = with(deviceLock);
-							texOutputCPU.push_back(AllocOutputCPUTexture(env));
-							out.data = texOutputCPU.back().get();
-						}
 
 						{
 							auto& lock = with(deviceLock);
@@ -357,7 +415,7 @@ protected:
 						// 下流に渡す
 						out.n = (data.n - rccaps.FutureFrames) * numFields + parity;
 						out.reset = resetOutput;
-						OutputFrame(out);
+						fromGPUThread.put(std::move(out));
 
 						resetOutput = false;
 						if (++nextOutputTex >= (int)texOutput.size()) {
@@ -381,12 +439,124 @@ protected:
 
 		// 例外が発生していたら下に流す
 		if (out.exception != nullptr) {
-			OutputFrame(out);
+			fromGPUThread.put(std::move(out));
+		}
+	}
+
+	CriticalSection receiveLock;
+	CondWait receiveCond;
+	int waitingFrame;
+	std::deque<FrameData<FrameType>> receiveQ;
+
+	void fromNV12Received(FrameData<ID3D11Texture2D*>&& data) {
+		auto env = data.env;
+		FrameData<FrameType> out = static_cast<FrameHeader>(data);
+
+		if (data.exception == nullptr) {
+			try {
+				out.data = NewVideoFrame(env);
+				D3D11_MAPPED_SUBRESOURCE res;
+				{
+					auto& lock = with(deviceLock);
+					COM_CHECK(devCtx->Map(data.data, 0, D3D11_MAP_READ, 0, &res));
+				}
+				FromGPUFrame(out.data, res, env);
+#if COUNT_FRAMES
+				++cntFrom;
+#endif
+				{
+					auto& lock = with(deviceLock);
+					devCtx->Unmap(data.data, 0);
+				}
+			}
+			catch (...) {
+				out.exception = std::current_exception();
+			}
+		}
+
+		// 入力フレームを解放
+		if (data.data != nullptr) {
+			auto& lock = with(outputTexPoolLock);
+			outputTexPool.push_back(data.data);
+		}
+
+		auto& lock = with(receiveLock);
+		if (data.reset) {
+			receiveQ.clear();
+		}
+		receiveQ.push_back(out);
+		if (out.n == waitingFrame) {
+			receiveCond.signal();
 		}
 	}
 
 	int cacheStartFrame; // 出力フレーム番号
 	int nextInputFrame;  // 入力フレーム番号
+	int ignoreFrames;    // 次にWaitFrameした時に無視するフレーム数（リセットのため）
+
+	void PutInputFrame(int n, ErrorHandler* env) {
+		int numFields = NumFramesPerBlock();
+		int procAhead = NumFramesProcAhead();
+		bool reset = false;
+		int inputStart = nextInputFrame;
+		int nsrc = n / numFields;
+		if (cacheStartFrame == INVALID_FRAME || n < cacheStartFrame || nsrc > nextInputFrame + (procAhead + cacheFrames + resetFrames)) {
+			// リセット
+			if (nextInputFrame != INVALID_FRAME) {
+				// 入れたフレームの処理が全部終わるまで待つ
+				WaitFrame((nextInputFrame - rccaps.PastFrames) * numFields - 1, env);
+				auto& lock = with(receiveLock);
+				receiveQ.clear();
+			}
+			reset = true;
+			nextInputFrame = nsrc - (cacheFrames + resetFrames);
+			cacheStartFrame = nextInputFrame * numFields;
+			inputStart = nextInputFrame - rccaps.PastFrames;
+			ignoreFrames = resetFrames;
+			PRINTF("Input Reset %d\n", n);
+		}
+		nextInputFrame = std::max(nextInputFrame, nsrc + procAhead);
+		for (int i = inputStart; i < nextInputFrame; ++i, reset = false) {
+			FrameData<FrameType> data;
+			data.env = env;
+			data.reset = reset;
+			data.n = i;
+			data.data = GetChildFrame(i, env);
+			toGPUThread.put(std::move(data));
+		}
+	}
+
+	void DropFrame(ErrorHandler* env) {
+		if (receiveQ.front().n != cacheStartFrame) {
+			env->ThrowError("[D3DVP Error] frame number unmatch 2");
+		}
+		receiveQ.pop_front();
+		++cacheStartFrame;
+	}
+
+	FrameType WaitFrame(int n, ErrorHandler* env) {
+		while (true) {
+			auto& lock = with(receiveLock);
+			// リセット直後のフレームは捨てる
+			for (; ignoreFrames; --ignoreFrames) DropFrame(env);
+			int idx = n - receiveQ.front().n;
+			if (idx < (int)receiveQ.size()) {
+				auto data = receiveQ[idx];
+				if (data.exception) {
+					std::rethrow_exception(data.exception);
+				}
+				if (data.n != n) {
+					env->ThrowError("[D3DVP Error] frame number unmatch 1");
+				}
+				while (numCache < (int)receiveQ.size()) {
+					DropFrame(env);
+				}
+				return data.data;
+			}
+			waitingFrame = n;
+			receiveCond.wait(receiveLock);
+		}
+	}
 
 	void CreateProcessor(ErrorHandler* env)
 	{
@@ -478,25 +648,23 @@ protected:
 			for (int rci = 0; rci < (int)caps.RateConversionCapsCount; ++rci) {
 				D3D11_VIDEO_PROCESSOR_RATE_CONVERSION_CAPS rccaps;
 				COM_CHECK(pEnum->GetVideoProcessorRateConversionCaps(rci, &rccaps));
-				if (rccaps.ProcessorCaps & D3D11_VIDEO_PROCESSOR_PROCESSOR_CAPS_DEINTERLACE_ADAPTIVE) {
-					ID3D11VideoProcessor* pVideoProcessor_;
-					COM_CHECK(pVideoDevice->CreateVideoProcessor(pEnum.get(), rci, &pVideoProcessor_));
-					auto pVideoProcessor = make_com_ptr(pVideoProcessor_);
+				ID3D11VideoProcessor* pVideoProcessor_;
+				COM_CHECK(pVideoDevice->CreateVideoProcessor(pEnum.get(), rci, &pVideoProcessor_));
+				auto pVideoProcessor = make_com_ptr(pVideoProcessor_);
 
-					dev = std::move(pDevice);
-					devCtx = std::move(pContext);
-					videoDev = std::move(pVideoDevice);
-					videoProcEnum = std::move(pEnum);
-					videoProc = std::move(pVideoProcessor);
-					this->caps = caps;
-					this->rccaps = rccaps;
+				dev = std::move(pDevice);
+				devCtx = std::move(pContext);
+				videoDev = std::move(pVideoDevice);
+				videoProcEnum = std::move(pEnum);
+				videoProc = std::move(pVideoProcessor);
+				this->caps = caps;
+				this->rccaps = rccaps;
 
-					ID3D11VideoContext* pVideoCtx_;
-					COM_CHECK(devCtx->QueryInterface(&pVideoCtx_));
-					videoCtx = make_com_ptr(pVideoCtx_);
+				ID3D11VideoContext* pVideoCtx_;
+				COM_CHECK(devCtx->QueryInterface(&pVideoCtx_));
+				videoCtx = make_com_ptr(pVideoCtx_);
 
-					return;
-				}
+				return;
 				/*
 				for (int k = 0; k < rccaps.CustomRateCount; ++k) {
 				D3D11_VIDEO_PROCESSOR_CUSTOM_RATE customRate;
@@ -510,25 +678,6 @@ protected:
 		}
 
 		env->ThrowError("No such device ...");
-	}
-
-	PCom<ID3D11Texture2D> AllocOutputCPUTexture(ErrorHandler* env) {
-		D3D11_TEXTURE2D_DESC desc = {};
-		desc.Width = width;
-		desc.Height = height;
-		desc.MipLevels = 1;
-		desc.ArraySize = 1;
-		desc.Format = format;
-		desc.SampleDesc.Count = 1;
-		desc.SampleDesc.Quality = 0;
-		desc.Usage = D3D11_USAGE_STAGING;
-		desc.BindFlags = 0;
-		desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-		desc.MiscFlags = 0;
-
-		ID3D11Texture2D* pTexOutputCPU_;
-		COM_CHECK(dev->CreateTexture2D(&desc, NULL, &pTexOutputCPU_));
-		return make_com_ptr(pTexOutputCPU_);
 	}
 
 	void CreateResources(ErrorHandler* env)
@@ -590,10 +739,18 @@ protected:
 		}
 
 		// 出力用CPUテクスチャ
+		desc.Width = width;
+		desc.Height = height;
+		desc.Usage = D3D11_USAGE_STAGING;
+		desc.BindFlags = 0;
+		desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+
 		texOutputCPU.resize(NBUF_OUT_TEX);
 		for (int i = 0; i < NBUF_OUT_TEX; ++i) {
-			texOutputCPU[i] = AllocOutputCPUTexture(env);
-			outputTexPool.push_back(texOutputCPU[i].get());
+			ID3D11Texture2D* pTexOutputCPU_;
+			COM_CHECK(dev->CreateTexture2D(&desc, NULL, &pTexOutputCPU_));
+			texOutputCPU[i] = make_com_ptr(pTexOutputCPU_);
+			outputTexPool.push_back(pTexOutputCPU_);
 		}
 
 		// InputView作成
@@ -619,7 +776,7 @@ protected:
 
 public:
 	D3DVP(VideoInfo srcvi, DXGI_FORMAT format, int mode, int tff, int width, int height, int quality,
-		const std::string& deviceName, int reset, int debug, ErrorHandler* env)
+		const std::string& deviceName, int cache, int reset, int debug, ErrorHandler* env)
 		: format(format)
 		, mode(mode)
 		, tff(tff)
@@ -627,22 +784,28 @@ public:
 		, height(height)
 		, quality(quality)
 		, deviceName(deviceName)
+		, cacheFrames(cache)
 		, resetFrames(reset)
 		, debug(debug)
 		, srcvi(srcvi)
+		, joinCalled(false)
+		, toGPUThread(this, env)
 		, processThread(this, env)
+		, fromGPUThread(this, env)
 		, waitingFrame(INVALID_FRAME)
 		, cacheStartFrame(INVALID_FRAME)
 		, nextInputFrame(INVALID_FRAME)
+		, ignoreFrames(0)
 	{
 		if (mode != 0 && mode != 1) env->ThrowError("[D3DVP Error] mode must be 0 or 1");
 		if (quality < 0 || quality > 2) env->ThrowError("[D3DVP Error] quality must be between 0 and 2");
+		if (cache < 0) env->ThrowError("[D3DVP Error] cache must be >= 0");
 		if (reset < 0) env->ThrowError("[D3DVP Error] reset must be >= 0");
 
 		CreateProcessor(env);
 		CreateResources(env);
 
-		numCache = std::max(NumFramesProcAhead() * NumFramesPerBlock(), 15);
+		numCache = (NumFramesProcAhead() + cacheFrames) * NumFramesPerBlock();
 
 #if COUNT_FRAMES
 		cntTo = 0;
@@ -652,13 +815,26 @@ public:
 		cntFrom = 0;
 #endif
 
+		toGPUThread.start();
 		processThread.start();
+		fromGPUThread.start();
 	}
 
 	virtual ~D3DVP() {
-		processThread.join();
+		if (joinCalled == false) {
+			MessageBox(NULL, "JoinThreads()が呼ばれる前に派生クラスが終了しました！！", "Error", MB_OK);
+		}
 #if COUNT_FRAMES
 		PRINTF("%d,%d,%d,%d,%d\n", cntTo, cntReset, cntRecv, cntProc, cntFrom);
+#endif
+#if PRINT_WAIT
+		double toP, toC, proP, proC, fromP, fromC;
+		toGPUThread.getTotalWait(toP, toC);
+		processThread.getTotalWait(proP, proC);
+		fromGPUThread.getTotalWait(fromP, fromC);
+		PRINTF("toGPUThread: %f,%f\n", toP, toC);
+		PRINTF("processThread: %f,%f\n", proP, proC);
+		PRINTF("fromGPUThread: %f,%f\n", fromP, fromC);
 #endif
 #if 0
 		// リーク検査
@@ -683,6 +859,19 @@ public:
 			pDebug->Release();
 		}
 #endif
+	}
+
+	// 派生クラスで実装している仮想関数がスレッドから呼ばれている可能性があるので
+	// 派生クラスのデストラクタが終了する前にスレッドを終了する必要がある
+	// 派生クラスのデストラクタが終了する前にこれを呼び出すこと！
+	void JoinThreads() {
+		if (joinCalled == false) {
+			toGPUThread.join();
+			processThread.join();
+			fromGPUThread.join();
+			receiveQ.clear();
+			joinCalled = true;
+		}
 	}
 
 	int NumFramesPerBlock() {
@@ -748,63 +937,6 @@ public:
 		PRINTF("Reset\n");
 		cacheStartFrame = INVALID_FRAME;
 	}
-
-	void PutInputFrame(int n, ErrorHandler* env) {
-		int numFields = NumFramesPerBlock();
-		int procAhead = NumFramesProcAhead();
-		bool reset = false;
-		int inputStart = nextInputFrame;
-		int nsrc = n / numFields;
-		if (cacheStartFrame == INVALID_FRAME || n < cacheStartFrame || nsrc > nextInputFrame + (procAhead + resetFrames)) {
-			// リセット
-			if (nextInputFrame != INVALID_FRAME) {
-				// 入れたフレームの処理が全部終わるまで待つ
-				WaitFrame((nextInputFrame - rccaps.PastFrames) * numFields - 1, env);
-				auto& lock = with(receiveLock);
-				receiveQ.clear();
-			}
-			reset = true;
-			nextInputFrame = nsrc - resetFrames;
-			cacheStartFrame = nextInputFrame * numFields;
-			inputStart = nextInputFrame - rccaps.PastFrames;
-			PRINTF("Input Reset %d\n", n);
-		}
-		nextInputFrame = std::max(nextInputFrame, nsrc + procAhead);
-		for (int i = inputStart; i < nextInputFrame; ++i, reset = false) {
-			InputFrame(i, reset, env);
-		}
-	}
-
-	CriticalSection receiveLock;
-	CondWait receiveCond;
-	int waitingFrame;
-	std::deque<FrameData<OUT_FRAME>> receiveQ;
-
-	OUT_FRAME WaitFrame(int n, ErrorHandler* env) {
-		while (true) {
-			auto& lock = with(receiveLock);
-			int idx = n - receiveQ.front().n;
-			if (idx < (int)receiveQ.size()) {
-				auto data = receiveQ[idx];
-				if (data.exception) {
-					std::rethrow_exception(data.exception);
-				}
-				if (data.n != n) {
-					env->ThrowError("[D3DVP Error] frame number unmatch 1");
-				}
-				while (numCache < (int)receiveQ.size()) {
-					if (receiveQ.front().n != cacheStartFrame) {
-						env->ThrowError("[D3DVP Error] frame number unmatch 2");
-					}
-					receiveQ.pop_front();
-					++cacheStartFrame;
-				}
-				return data.data;
-			}
-			waitingFrame = n;
-			receiveCond.wait(receiveLock);
-		}
-	}
 };
 
 // AviSynth用ロジックを実装したクラス
@@ -813,7 +945,7 @@ class D3DVPAvsWorker : public D3DVP<PVideoFrame, IScriptEnvironment2>
 	typedef uint8_t pixel_t;
 
 	PClip child;
-	VideoInfo vi;
+	VideoInfo vi; // 出力フォーマット
 
 	int logUVx;
 	int logUVy;
@@ -830,41 +962,17 @@ class D3DVPAvsWorker : public D3DVP<PVideoFrame, IScriptEnvironment2>
 		int pitchY, int pitchUV,
 		const uint8_t* src, int srcPitch);
 
-	class ToNV12Thread : public DataPumpThread<FrameData<PVideoFrame>, IScriptEnvironment2, PRINT_WAIT> {
-	public:
-		ToNV12Thread(D3DVPAvsWorker* this_, IScriptEnvironment2* env)
-			: DataPumpThread(NBUF_IN_FRAME, env)
-			, this_(this_) { }
-	protected:
-		virtual void OnDataReceived(FrameData<PVideoFrame>&& data) {
-			this_->toNV12Received(std::move(data));
-		}
-	private:
-		D3DVPAvsWorker* this_;
-	};
-
-	class FromNV12Thread : public DataPumpThread<FrameData<ID3D11Texture2D*>, IScriptEnvironment2, PRINT_WAIT> {
-	public:
-		FromNV12Thread(D3DVPAvsWorker* this_, IScriptEnvironment2* env)
-			: DataPumpThread(NBUF_OUT_TEX - 2, env)
-			, this_(this_) { }
-	protected:
-		virtual void OnDataReceived(FrameData<ID3D11Texture2D*>&& data) {
-			this_->fromNV12Received(std::move(data));
-		}
-	private:
-		D3DVPAvsWorker* this_;
-	};
-
-	ToNV12Thread toNV12Thread;
-	FromNV12Thread fromNV12Thread;
-
 	PVideoFrame GetChildFrame(int n, IScriptEnvironment2* env) {
 		n = std::max(0, std::min(srcvi.num_frames - 1, n));
 		return child->GetFrame(n, env);
 	}
 
-	void toNV12(PVideoFrame& src, D3D11_MAPPED_SUBRESOURCE dst)
+	PVideoFrame NewVideoFrame(IScriptEnvironment2* env)
+	{
+		return env->NewVideoFrame(vi);
+	}
+
+	void ToGPUFrame(PVideoFrame& src, D3D11_MAPPED_SUBRESOURCE dst, IScriptEnvironment2* env)
 	{
 		const pixel_t* srcY = reinterpret_cast<const pixel_t*>(src->GetReadPtr(PLANAR_Y));
 		const pixel_t* srcU = reinterpret_cast<const pixel_t*>(src->GetReadPtr(PLANAR_U));
@@ -876,7 +984,7 @@ class D3DVPAvsWorker : public D3DVP<PVideoFrame, IScriptEnvironment2>
 		yuv_to_nv12(srcvi.height, srcvi.width, dstY, dstPitch, srcY, srcU, srcV, pitchY, pitchUV);
 	}
 
-	void fromNV12(PVideoFrame& dst, D3D11_MAPPED_SUBRESOURCE src)
+	void FromGPUFrame(PVideoFrame& dst, D3D11_MAPPED_SUBRESOURCE src, IScriptEnvironment2* env)
 	{
 		pixel_t* dstY = reinterpret_cast<pixel_t*>(dst->GetWritePtr(PLANAR_Y));
 		pixel_t* dstU = reinterpret_cast<pixel_t*>(dst->GetWritePtr(PLANAR_U));
@@ -888,112 +996,17 @@ class D3DVPAvsWorker : public D3DVP<PVideoFrame, IScriptEnvironment2>
 		nv12_to_yuv(height, width, dstY, dstU, dstV, pitchY, pitchUV, srcY, srcPitch);
 	}
 
-	void toNV12Received(FrameData<PVideoFrame>&& data) {
-		auto env = data.env;
-		FrameData<ID3D11Texture2D*> out = static_cast<FrameHeader>(data);
-		out.data = nullptr;
-
-		if (data.exception == nullptr) {
-			try {
-				{
-					auto& lock = with(inputTexPoolLock);
-					out.data = inputTexPool.back();
-					inputTexPool.pop_back();
-				}
-
-				D3D11_MAPPED_SUBRESOURCE res;
-				{
-					auto& lock = with(deviceLock);
-					COM_CHECK(devCtx->Map(out.data, 0, D3D11_MAP_WRITE, 0, &res));
-				}
-				toNV12(data.data, res);
-#if COUNT_FRAMES
-				++cntTo;
-#endif
-				{
-					auto& lock = with(deviceLock);
-					devCtx->Unmap(out.data, 0);
-				}
-			}
-			catch (...) {
-				out.exception = std::current_exception();
-			}
-		}
-
-		processThread.put(std::move(out));
-	}
-
-	void fromNV12Received(FrameData<ID3D11Texture2D*>&& data) {
-		auto env = data.env;
-		FrameData<PVideoFrame> out = static_cast<FrameHeader>(data);
-
-		if (data.exception == nullptr) {
-			try {
-				out.data = env->NewVideoFrame(vi);
-				D3D11_MAPPED_SUBRESOURCE res;
-				{
-					auto& lock = with(deviceLock);
-					COM_CHECK(devCtx->Map(data.data, 0, D3D11_MAP_READ, 0, &res));
-				}
-				fromNV12(out.data, res);
-#if COUNT_FRAMES
-				++cntFrom;
-#endif
-				{
-					auto& lock = with(deviceLock);
-					devCtx->Unmap(data.data, 0);
-				}
-			}
-			catch (...) {
-				out.exception = std::current_exception();
-			}
-		}
-
-		// 入力フレームを解放
-		if (data.data != nullptr) {
-			auto& lock = with(outputTexPoolLock);
-			outputTexPool.push_back(data.data);
-		}
-
-		auto& lock = with(receiveLock);
-		if (data.reset) {
-			receiveQ.clear();
-		}
-		receiveQ.push_back(out);
-		if (out.n == waitingFrame) {
-			receiveCond.signal();
-		}
-	}
-
 	int cacheStartFrame; // 出力フレーム番号
 	int nextInputFrame;  // 入力フレーム番号
 
-	virtual void InputFrame(int n, bool reset, IScriptEnvironment2* env) {
-		FrameData<PVideoFrame> data;
-		data.env = env;
-		data.reset = reset;
-		data.n = n;
-		data.data = GetChildFrame(n, env);
-		toNV12Thread.put(std::move(data));
-	}
-
-	virtual void OutputFrame(FrameData<ID3D11Texture2D*>& data) {
-		fromNV12Thread.put(std::move(data));
-	}
-
 public:
-	D3DVPAvsWorker(PClip child, DXGI_FORMAT format, int mode, int tff, int width, int height, int quality,
-		const std::string& deviceName, int reset, int debug,
+	D3DVPAvsWorker(PClip child, DXGI_FORMAT format, int mode, int tff, VideoInfo vi, int quality,
+		const std::string& deviceName, int cache, int reset, int debug,
 		IScriptEnvironment2* env)
-		: D3DVP(child->GetVideoInfo(), format, mode, tff, width, height, quality, deviceName, reset, debug, env) 
+		: D3DVP(child->GetVideoInfo(), format, mode, tff, vi.width, vi.height, quality, deviceName, cache, reset, debug, env)
 		, child(child)
-		, vi(child->GetVideoInfo())
-		, toNV12Thread(this, env)
-		, fromNV12Thread(this, env)
+		, vi(vi)
 	{
-		logUVx = vi.GetPlaneWidthSubsampling(PLANAR_U);
-		logUVy = vi.GetPlaneHeightSubsampling(PLANAR_U);
-
 #if COUNT_FRAMES
 		cntTo = 0;
 		cntReset = 0;
@@ -1010,26 +1023,14 @@ public:
 			yuv_to_nv12 = yuv_to_nv12_c;
 			nv12_to_yuv = nv12_to_yuv_c;
 		}
-
-		toNV12Thread.start();
-		fromNV12Thread.start();
 	}
 
 	~D3DVPAvsWorker() {
-		toNV12Thread.join();
-		fromNV12Thread.join();
-#if PRINT_WAIT
-		double toP, toC, proP, proC, fromP, fromC;
-		toNV12Thread.getTotalWait(toP, toC);
-		processThread.getTotalWait(proP, proC);
-		fromNV12Thread.getTotalWait(fromP, fromC);
-		PRINTF("toNV12Thread: %f,%f\n", toP, toC);
-		PRINTF("processThread: %f,%f\n", proP, proC);
-		PRINTF("fromNV12Thread: %f,%f\n", fromP, fromC);
-#endif
+		JoinThreads();
 	}
 
 	PVideoFrame GetFrame(int n, IScriptEnvironment2* env) {
+		PutInputFrame(n, env);
 		return WaitFrame(n, env);
 	}
 };
@@ -1045,46 +1046,23 @@ class D3DVPAvs : public GenericVideoFilter
 	bool autop;
 	int nr, edge;
 	const std::string deviceName;
-	int reset, debug;
+	int cache, reset, debug;
 
 	std::unique_ptr<D3DVPAvsWorker> w;
 
-	PCom<IDXGIDebug> dxgiDebug;
-
-	void GetDebugInterface(IScriptEnvironment2* env) {
-		if (!dxgiDebug)
-		{
-			// 作成
-			typedef HRESULT(__stdcall *fPtr)(const IID&, void**);
-			HMODULE hDll = GetModuleHandleW(L"dxgidebug.dll");
-			fPtr DXGIGetDebugInterface = (fPtr)GetProcAddress(hDll, "DXGIGetDebugInterface");
-
-			IDXGIDebug* pDebug;
-			DXGIGetDebugInterface(__uuidof(IDXGIDebug), (void**)&pDebug);
-			dxgiDebug = make_com_ptr(pDebug);
-		}
-	}
-
-	void CheckResourceLeak(IScriptEnvironment2* env) {
-		GetDebugInterface(env);
-		dxgiDebug->ReportLiveObjects(DXGI_DEBUG_D3D11, DXGI_DEBUG_RLO_DETAIL);
-	}
-
 	void ResetInstance(IScriptEnvironment2* env) {
 		w = nullptr;
-		//CheckResourceLeak(env);
 		w = std::unique_ptr<D3DVPAvsWorker>(new D3DVPAvsWorker(child,
 			DXGI_FORMAT_NV12, mode,
-			tff, vi.width, vi.height, quality, deviceName, reset, debug, env));
+			tff, vi, quality, deviceName, cache, reset, debug, env));
 		w->SetFilter(autop, nr, edge, env);
 	}
 
 	PVideoFrame __stdcall GetFrame(int n, IScriptEnvironment* env_, int retry)
 	{
 		IScriptEnvironment2* env = static_cast<IScriptEnvironment2*>(env_);
-		w->PutInputFrame(n, env);
 		try {
-			return w->WaitFrame(n, env);
+			return w->GetFrame(n, env);
 		}
 		catch (const AvisynthError&) {
 			if (retry >= 2) {
@@ -1098,7 +1076,7 @@ class D3DVPAvs : public GenericVideoFilter
 
 public:
 	D3DVPAvs(PClip child, int mode, int order, int width, int height, int quality,
-		bool autop, int nr, int edge, const std::string& deviceName, int reset, int debug,
+		bool autop, int nr, int edge, const std::string& deviceName, int cache, int reset, int debug,
 		IScriptEnvironment2* env)
 		: GenericVideoFilter(child)
 		, mode(mode)
@@ -1107,6 +1085,7 @@ public:
 		, nr(nr)
 		, edge(edge)
 		, deviceName(deviceName)
+		, cache(cache)
 		, reset(reset)
 		, debug(debug)
 	{
@@ -1153,8 +1132,9 @@ public:
 			args[7].AsInt(-1),    // nr
 			args[8].AsInt(-1),    // edge
 			args[9].AsString(""), // device
-			args[10].AsInt(30),   // reset
-			args[11].AsInt(0),    // debug
+			args[10].AsInt(15),   // cache
+			args[11].AsInt(4),   // reset
+			args[12].AsInt(0),    // debug
 			env);
 	}
 };
@@ -1165,7 +1145,7 @@ extern "C" __declspec(dllexport) const char* __stdcall AvisynthPluginInit3(IScri
 {
 	AVS_linkage = vectors;
 
-	env->AddFunction("D3DVP", "c[mode]i[order]i[width]i[height]i[quality]i[autop]b[nr]i[edge]i[device]s[reset]i[debug]i", D3DVPAvs::Create, 0);
+	env->AddFunction("D3DVP", "c[mode]i[order]i[width]i[height]i[quality]i[autop]b[nr]i[edge]i[device]s[cache]i[reset]i[debug]i", D3DVPAvs::Create, 0);
 
 	return "Direct3D VideoProcessing Plugin";
 }
@@ -1243,8 +1223,7 @@ static void init_console()
 //---------------------------------------------------------------------
 EXTERN_C __declspec(dllexport) FILTER_DLL * __stdcall GetFilterTable(void)
 {
-	//MessageBox(NULL, "!!!", "D3DVP", MB_OK);
-	init_console();
+	//init_console();
 	return &filter;
 }
 //	下記のようにすると1つのaufファイルで複数のフィルタ構造体を渡すことが出来ます
@@ -1263,193 +1242,134 @@ T clamp(T n, T min, T max)
 	return n < min ? min : n;
 }
 
-struct YC48toX {
-	uint8_t* dst;
-	int pitch;
-	const PIXEL_YC* src;
-	int w, h, max_w;
-};
+void yc48_to_yuy2(uint8_t* dst, int pitch, const PIXEL_YC* src, int w, int h, int max_w) {
+	uint8_t* dstptr = dst;
 
-struct YC48toYUY2 : public YC48toX {
-	YC48toYUY2(const YC48toX& d) : YC48toX(d) { }
-	void operator()(int y_start, int y_end) const {
-		uint8_t* dstptr = dst;
+	for (int y = 0; y < h; ++y) {
+		for (int x = 0; x < w; x += 2) {
+			short y0 = src[x + y * max_w].y;
+			short y1 = src[x + 1 + y * max_w].y;
+			short cb = src[x + y * max_w].cb;
+			short cr = src[x + y * max_w].cr;
 
-		for (int y = y_start; y < y_end; ++y) {
-			for (int x = 0; x < w; x += 2) {
-				short y0 = src[x + y * max_w].y;
-				short y1 = src[x + 1 + y * max_w].y;
-				short cb = src[x + y * max_w].cb;
-				short cr = src[x + y * max_w].cr;
+			uint8_t Y0 = clamp(((y0 * 219 + 383) >> 12) + 16, 0, 255);
+			uint8_t Y1 = clamp(((y1 * 219 + 383) >> 12) + 16, 0, 255);
+			uint8_t U = clamp((((cb + 2048) * 7 + 66) >> 7) + 16, 0, 255);
+			uint8_t V = clamp((((cr + 2048) * 7 + 66) >> 7) + 16, 0, 255);
 
-				uint8_t Y0 = clamp(((y0 * 219 + 383) >> 12) + 16, 0, 255);
-				uint8_t Y1 = clamp(((y1 * 219 + 383) >> 12) + 16, 0, 255);
-				uint8_t U = clamp((((cb + 2048) * 7 + 66) >> 7) + 16, 0, 255);
-				uint8_t V = clamp((((cr + 2048) * 7 + 66) >> 7) + 16, 0, 255);
-
-				dstptr[x * 2 + 0 + y * pitch] = Y0;
-				dstptr[x * 2 + 1 + y * pitch] = U;
-				dstptr[x * 2 + 2 + y * pitch] = Y1;
-				dstptr[x * 2 + 3 + y * pitch] = V;
-			}
+			dstptr[x * 2 + 0 + y * pitch] = Y0;
+			dstptr[x * 2 + 1 + y * pitch] = U;
+			dstptr[x * 2 + 2 + y * pitch] = Y1;
+			dstptr[x * 2 + 3 + y * pitch] = V;
 		}
 	}
-};
-
-struct YC48toNV12 : public YC48toX {
-	YC48toNV12(const YC48toX& d) : YC48toX(d) { }
-	void operator()(int y_start, int y_end) const {
-		uint8_t* dstY = dst;
-		uint8_t* dstUV = dstY + h * pitch;
-
-		for (int y = y_start; y < y_end; ++y) {
-			for (int x = 0; x < w; x += 2) {
-				short y0 = src[x + y * max_w].y;
-				short y1 = src[x + 1 + y * max_w].y;
-				short cb = src[x + y * max_w].cb;
-				short cr = src[x + y * max_w].cr;
-
-				uint8_t Y0 = clamp(((y0 * 219 + 383) >> 12) + 16, 0, 255);
-				uint8_t Y1 = clamp(((y1 * 219 + 383) >> 12) + 16, 0, 255);
-				uint8_t U = clamp((((cb + 2048) * 7 + 66) >> 7) + 16, 0, 255);
-				uint8_t V = clamp((((cr + 2048) * 7 + 66) >> 7) + 16, 0, 255);
-
-				dstY[x + 0 + y * pitch] = Y0;
-				dstY[x + 1 + y * pitch] = Y1;
-				dstUV[x + 0 + (y >> 1) * pitch] = U;
-				dstUV[x + 1 + (y >> 1) * pitch] = V;
-			}
-		}
-	}
-};
-
-struct XtoYC48 {
-	PIXEL_YC* dst;
-	const uint8_t* src;
-	int pitch;
-	int w, h, max_w;
-};
-
-struct YUY2toYC48 : public XtoYC48 {
-	YUY2toYC48(const XtoYC48& d) : XtoYC48(d) { }
-	void operator()(int y_start, int y_end) const {
-		const uint8_t* srcptr = src;
-
-		for (int y = y_start; y < y_end; ++y) {
-
-			// まずはUVは左にそのまま入れる
-			for (int x = 0, x2 = 0; x < w; x += 2, ++x2) {
-				uint8_t Y0 = srcptr[x * 2 + 0 + y * pitch];
-				uint8_t U = srcptr[x * 2 + 1 + y * pitch];
-				uint8_t Y1 = srcptr[x * 2 + 2 + y * pitch];
-				uint8_t V = srcptr[x * 2 + 3 + y * pitch];
-
-				short y0 = ((Y0 * 1197) >> 6) - 299;
-				short y1 = ((Y1 * 1197) >> 6) - 299;
-				short cb = ((U - 128) * 4681 + 164) >> 8;
-				short cr = ((V - 128) * 4681 + 164) >> 8;
-
-				dst[x + y * max_w].y = y0;
-				dst[x + 1 + y * max_w].y = y1;
-				dst[x + y * max_w].cb = cb;
-				dst[x + y * max_w].cr = cr;
-			}
-
-			// UVの入っていないところを補間
-			short cb0 = dst[y * max_w].cb;
-			short cr0 = dst[y * max_w].cr;
-			for (int x = 0; x < w - 2; x += 2) {
-				short cb2 = dst[x + 2 + y * max_w].cb;
-				short cr2 = dst[x + 2 + y * max_w].cr;
-				dst[x + 1 + y * max_w].cb = (cb0 + cb2) >> 1;
-				dst[x + 1 + y * max_w].cr = (cr0 + cr2) >> 1;
-				cb0 = cb2;
-				cr0 = cr2;
-			}
-			dst[w - 1 + y * max_w].cb = cb0;
-			dst[w - 1 + y * max_w].cr = cr0;
-		}
-	}
-};
-
-struct NV12toYC48 : public XtoYC48 {
-	NV12toYC48(const XtoYC48& d) : XtoYC48(d) { }
-	void operator()(int y_start, int y_end) const {
-		const uint8_t* srcY = src;
-		const uint8_t* srcUV = srcY + h * pitch;
-
-		for (int y = y_start; y < y_end; ++y) {
-
-			// まずはUVは左にそのまま入れる
-			for (int x = 0, x2 = 0; x < w; x += 2, ++x2) {
-				uint8_t Y0 = srcY[x + 0 + y * pitch];
-				uint8_t Y1 = srcY[x + 1 + y * pitch];
-				uint8_t U = srcUV[x + 0 + (y >> 1) * pitch];
-				uint8_t V = srcUV[x + 1 + (y >> 1) * pitch];
-
-				short y0 = ((Y0 * 1197) >> 6) - 299;
-				short y1 = ((Y1 * 1197) >> 6) - 299;
-				short cb = ((U - 128) * 4681 + 164) >> 8;
-				short cr = ((V - 128) * 4681 + 164) >> 8;
-
-				dst[x + y * max_w].y = y0;
-				dst[x + 1 + y * max_w].y = y1;
-				dst[x + y * max_w].cb = cb;
-				dst[x + y * max_w].cr = cr;
-			}
-
-			// UVの入っていないところを補間
-			short cb0 = dst[y * max_w].cb;
-			short cr0 = dst[y * max_w].cr;
-			for (int x = 0; x < w - 2; x += 2) {
-				short cb2 = dst[x + 2 + y * max_w].cb;
-				short cr2 = dst[x + 2 + y * max_w].cr;
-				dst[x + 1 + y * max_w].cb = (cb0 + cb2) >> 1;
-				dst[x + 1 + y * max_w].cr = (cr0 + cr2) >> 1;
-				cb0 = cb2;
-				cr0 = cr2;
-			}
-			dst[w - 1 + y * max_w].cb = cb0;
-			dst[w - 1 + y * max_w].cr = cr0;
-		}
-	}
-};
-
-template <typename T>
-void multi_thread_convert_func(int thread_id, int thread_num, void *param1, void *param2)
-{
-	//    thread_id    : スレッド番号 ( 0 ～ thread_num-1 )
-	//    thread_num    : スレッド数 ( 1 ～ )
-	//    param1        : 汎用パラメータ
-	//    param2        : 汎用パラメータ
-	//
-	//    この関数内からWin32APIや外部関数(rgb2yc,yc2rgbは除く)を使用しないでください。
-	//
-	const T& cvt = *static_cast<T*>(param1);
-
-	int sz = (cvt.h + thread_num - 1) / thread_num;
-	int y_start = std::min(cvt.h, sz * thread_id);
-	int y_end = std::min(cvt.h, y_start + sz);
-
-	cvt(y_start, y_end);
 }
 
-template <typename T>
-void convert_format(uint8_t* dst, int pitch, const PIXEL_YC* src, int w, int h, int max_w, FILTER *fp)
-{
-	YC48toX d = { dst, pitch, src, w, h, max_w };
-	T cvt = d;
-	fp->exfunc->exec_multi_thread_func(
-		multi_thread_convert_func<T>, &cvt, NULL);
+void yc48_to_nv12(uint8_t* dst, int pitch, const PIXEL_YC* src, int w, int h, int max_w) {
+	uint8_t* dstY = dst;
+	uint8_t* dstUV = dstY + h * pitch;
+
+	for (int y = 0; y < h; ++y) {
+		int y2 = (y >> 1);
+		for (int x = 0; x < w; x += 2) {
+			short y0 = src[x + y * max_w].y;
+			short y1 = src[x + 1 + y * max_w].y;
+			short cb = src[x + y * max_w].cb;
+			short cr = src[x + y * max_w].cr;
+
+			uint8_t Y0 = clamp(((y0 * 219 + 383) >> 12) + 16, 0, 255);
+			uint8_t Y1 = clamp(((y1 * 219 + 383) >> 12) + 16, 0, 255);
+			uint8_t U = clamp((((cb + 2048) * 7 + 66) >> 7) + 16, 0, 255);
+			uint8_t V = clamp((((cr + 2048) * 7 + 66) >> 7) + 16, 0, 255);
+
+			dstY[x + 0 + y * pitch] = Y0;
+			dstY[x + 1 + y * pitch] = Y1;
+
+			if ((y & 1) == (y2 & 1)) {
+				dstUV[x + 0 + y2 * pitch] = U;
+				dstUV[x + 1 + y2 * pitch] = V;
+			}
+		}
+	}
 }
 
-template <typename T>
-void convert_format(PIXEL_YC* dst, const uint8_t* src, int pitch, int w, int h, int max_w, FILTER *fp)
-{
-	XtoYC48 d = { dst, src, pitch, w, h, max_w };
-	T cvt = d;
-	fp->exfunc->exec_multi_thread_func(
-		multi_thread_convert_func<T>, &cvt, NULL);
+void yuy2_to_yc48(PIXEL_YC* dst, const uint8_t* src, int pitch, int w, int h, int max_w) {
+	const uint8_t* srcptr = src;
+
+	for (int y = 0; y < h; ++y) {
+
+		// まずはUVは左にそのまま入れる
+		for (int x = 0, x2 = 0; x < w; x += 2, ++x2) {
+			uint8_t Y0 = srcptr[x * 2 + 0 + y * pitch];
+			uint8_t U = srcptr[x * 2 + 1 + y * pitch];
+			uint8_t Y1 = srcptr[x * 2 + 2 + y * pitch];
+			uint8_t V = srcptr[x * 2 + 3 + y * pitch];
+
+			short y0 = ((Y0 * 1197) >> 6) - 299;
+			short y1 = ((Y1 * 1197) >> 6) - 299;
+			short cb = ((U - 128) * 4681 + 164) >> 8;
+			short cr = ((V - 128) * 4681 + 164) >> 8;
+
+			dst[x + y * max_w].y = y0;
+			dst[x + 1 + y * max_w].y = y1;
+			dst[x + y * max_w].cb = cb;
+			dst[x + y * max_w].cr = cr;
+		}
+
+		// UVの入っていないところを補間
+		short cb0 = dst[y * max_w].cb;
+		short cr0 = dst[y * max_w].cr;
+		for (int x = 0; x < w - 2; x += 2) {
+			short cb2 = dst[x + 2 + y * max_w].cb;
+			short cr2 = dst[x + 2 + y * max_w].cr;
+			dst[x + 1 + y * max_w].cb = (cb0 + cb2) >> 1;
+			dst[x + 1 + y * max_w].cr = (cr0 + cr2) >> 1;
+			cb0 = cb2;
+			cr0 = cr2;
+		}
+		dst[w - 1 + y * max_w].cb = cb0;
+		dst[w - 1 + y * max_w].cr = cr0;
+	}
+}
+
+void nv12_to_yc48(PIXEL_YC* dst, const uint8_t* src, int pitch, int w, int h, int max_w) {
+	const uint8_t* srcY = src;
+	const uint8_t* srcUV = srcY + h * pitch;
+
+	for (int y = 0; y < h; ++y) {
+
+		// まずはUVは左にそのまま入れる
+		for (int x = 0, x2 = 0; x < w; x += 2, ++x2) {
+			uint8_t Y0 = srcY[x + 0 + y * pitch];
+			uint8_t Y1 = srcY[x + 1 + y * pitch];
+			uint8_t U = srcUV[x + 0 + (y >> 1) * pitch];
+			uint8_t V = srcUV[x + 1 + (y >> 1) * pitch];
+
+			short y0 = ((Y0 * 1197) >> 6) - 299;
+			short y1 = ((Y1 * 1197) >> 6) - 299;
+			short cb = ((U - 128) * 4681 + 164) >> 8;
+			short cr = ((V - 128) * 4681 + 164) >> 8;
+
+			dst[x + y * max_w].y = y0;
+			dst[x + 1 + y * max_w].y = y1;
+			dst[x + y * max_w].cb = cb;
+			dst[x + y * max_w].cr = cr;
+		}
+
+		// UVの入っていないところを補間
+		short cb0 = dst[y * max_w].cb;
+		short cr0 = dst[y * max_w].cr;
+		for (int x = 0; x < w - 2; x += 2) {
+			short cb2 = dst[x + 2 + y * max_w].cb;
+			short cr2 = dst[x + 2 + y * max_w].cr;
+			dst[x + 1 + y * max_w].cb = (cb0 + cb2) >> 1;
+			dst[x + 1 + y * max_w].cr = (cr0 + cr2) >> 1;
+			cb0 = cb2;
+			cr0 = cr2;
+		}
+		dst[w - 1 + y * max_w].cb = cb0;
+		dst[w - 1 + y * max_w].cr = cr0;
+	}
 }
 
 struct AviUtlErrorHandler {
@@ -1478,25 +1398,70 @@ public:
 	}
 };
 
-struct ITexurePool {
-	virtual void ReleaseTexture(ID3D11Texture2D* tex) = 0;
+struct FramePool {
+	int w_, h_;
+	std::vector<PIXEL_YC*> pool_;
+	CriticalSection lock_;
+	~FramePool() {
+		Clear();
+	}
+	void SetSetting(int w, int h) {
+		auto& lock = with(lock_);
+		if (w != w_ || h != h_) {
+			Clear();
+		}
+		w = w_;
+		h = h_;
+	}
+	void Free(PIXEL_YC* ptr, int w, int h) {
+		auto& lock = with(lock_);
+		if (w != w_ || h != h_) {
+			delete[] ptr;
+		}
+		else {
+			pool_.push_back(ptr);
+		}
+	}
+	PIXEL_YC* Alloc(int w, int h) {
+		auto& lock = with(lock_);
+		if (w != w_ || h != h_) {
+			return new PIXEL_YC[w*h];
+		}
+		else {
+			if (pool_.size() > 0) {
+				auto ptr = pool_.back();
+				pool_.pop_back();
+				return ptr;
+			}
+			return new PIXEL_YC[w*h];
+		}
+	}
+private:
+	void Clear() {
+		for (PIXEL_YC* ptr : pool_) {
+			delete[] ptr;
+		}
+		pool_.clear();
+	}
 };
-struct OutputTexture
-{
-	ID3D11Texture2D* tex;
-	ITexurePool* pool;
-	OutputTexture(ID3D11Texture2D* tex, ITexurePool* pool)
-		: tex(tex), pool(pool) { }
-	~OutputTexture()
-	{
-		if (tex != nullptr) {
-			pool->ReleaseTexture(tex);
+
+struct AviUtlFrame {
+	PIXEL_YC* yc;
+	int w, h;
+	FramePool* pool;
+	AviUtlFrame(PIXEL_YC* yc, int w, int h)
+		: yc(yc), w(w), h(h), pool() { }
+	AviUtlFrame(PIXEL_YC* yc, int w, int h, FramePool* pool)
+		: yc(yc), w(w), h(h), pool(pool) { }
+	~AviUtlFrame() {
+		if (pool && yc) {
+			pool->Free(yc, w, h);
 		}
 	}
 };
 
 // AviUtl用ロジックを実装したクラス
-class D3DVPAviUtlWork : public D3DVP<std::shared_ptr<OutputTexture>, AviUtlErrorHandler>, public ITexurePool
+class D3DVPAviUtlWork : public D3DVP<std::shared_ptr<AviUtlFrame>, AviUtlErrorHandler>
 {
 	bool is420;
 
@@ -1504,8 +1469,18 @@ class D3DVPAviUtlWork : public D3DVP<std::shared_ptr<OutputTexture>, AviUtlError
 	FILTER *fp_;
 	FILTER_PROC_INFO *fpip_;
 
-	PIXEL_YC* GetChildFrame(int n, AviUtlErrorHandler* env)
+	FramePool pool_;
+
+	std::shared_ptr<AviUtlFrame> NewVideoFrame(AviUtlErrorHandler* env)
 	{
+		return std::make_shared<AviUtlFrame>(pool_.Alloc(width, height), width, height, &pool_);
+	}
+
+	std::shared_ptr<AviUtlFrame> GetChildFrame(int n, AviUtlErrorHandler* env)
+	{
+		// 2倍FPSを反映
+		n *= NumFramesPerBlock();
+
 		n = std::max(0, std::min(fpip_->frame_n - 1, n));
 
 		PIXEL_YC* frame_ptr;
@@ -1515,133 +1490,69 @@ class D3DVPAviUtlWork : public D3DVP<std::shared_ptr<OutputTexture>, AviUtlError
 		}
 		else {
 			// 今のフレームでない
-			frame_ptr = (PIXEL_YC*)fp_->exfunc->get_ycp_filtering(fp_, fpip_->editp, n, NULL);
+			if (!fp_->exfunc->set_ycp_filtering_cache_size(fp_, fpip_->max_w, fpip_->h, NBUF_IN_FRAME, 0)) {
+				env->ThrowError("メモリ不足");
+			}
+			frame_ptr = fp_->exfunc->get_ycp_filtering_cache_ex(fp_, fpip_->editp, n, NULL, NULL);
 			if (frame_ptr == NULL) {
 				// メモリ不足
 				env->ThrowError("メモリ不足");
 			}
 		}
-		return frame_ptr;
+#if 0
+		auto ret = std::make_shared<AviUtlFrame>(pool_.Alloc(fpip_->max_w, fpip_->h), fpip_->max_w, fpip_->h, &pool_);
+		memcpy(ret->yc, frame_ptr, sizeof(PIXEL_YC)*fpip_->max_w*fpip_->h);
+		return ret;
+#else
+		return std::make_shared<AviUtlFrame>(frame_ptr, fpip_->max_w, fpip_->h);
+#endif
 	}
 
-	virtual void ReleaseTexture(ID3D11Texture2D* tex) {
-		auto& lock = with(outputTexPoolLock);
-		outputTexPool.push_back(tex);
-	}
-
-	virtual void InputFrame(int n, bool reset, AviUtlErrorHandler* env)
-	{
-		PRINTF("InputFrame %d\n", n);
-		ID3D11Texture2D* tex;
-		{
-			auto& lock = with(inputTexPoolLock);
-			tex = inputTexPool.back();
-			inputTexPool.pop_back();
-		}
-
-		D3D11_MAPPED_SUBRESOURCE res;
-		{
-			auto& lock = with(deviceLock);
-			COM_CHECK(devCtx->Map(tex, 0, D3D11_MAP_WRITE, 0, &res));
-		}
-
-		int nsrc = n * NumFramesPerBlock();
-		auto src = GetChildFrame(nsrc, env);
-		uint8_t* dstY = reinterpret_cast<uint8_t*>(res.pData);
-
+	void ToGPUFrame(std::shared_ptr<AviUtlFrame>& frame, D3D11_MAPPED_SUBRESOURCE res, AviUtlErrorHandler* env) {
+		uint8_t* dst = static_cast<uint8_t*>(res.pData);
 		if (is420) {
-			convert_format<YC48toNV12>(dstY, res.RowPitch, src, fpip_->w, fpip_->h, fpip_->max_w, fp_);
+			yc48_to_nv12(dst, res.RowPitch, frame->yc, srcvi.width, srcvi.height, frame->w);
 		}
 		else {
-			convert_format<YC48toYUY2>(dstY, res.RowPitch, src, fpip_->w, fpip_->h, fpip_->max_w, fp_);
+			yc48_to_yuy2(dst, res.RowPitch, frame->yc, srcvi.width, srcvi.height, frame->w);
 		}
-
-#if COUNT_FRAMES
-		++cntTo;
-#endif
-		{
-			auto& lock = with(deviceLock);
-			devCtx->Unmap(tex, 0);
-		}
-
-		FrameData<ID3D11Texture2D*> data;
-		data.env = env;
-		data.reset = reset;
-		data.n = n;
-		data.data = tex;
-		//processThread.put(std::move(data));
-		processReceived(std::move(data));
 	}
 
-	virtual void OutputFrame(FrameData<ID3D11Texture2D*>& data)
-	{
-		FrameData<std::shared_ptr<OutputTexture>> out = (FrameHeader)data;
-		out.data = std::make_shared<OutputTexture>(data.data, this);
-		PRINTF("OutputFrame %d\n", data.n);
-		auto& lock = with(receiveLock);
-		if (out.reset) {
-			receiveQ.clear();
+	void FromGPUFrame(std::shared_ptr<AviUtlFrame>& frame, D3D11_MAPPED_SUBRESOURCE res, AviUtlErrorHandler* env) {
+		const uint8_t* src = static_cast<const uint8_t*>(res.pData);
+		if (is420) {
+			nv12_to_yc48(frame->yc, src, res.RowPitch, width, height, frame->w);
 		}
-		int n = out.n;
-		receiveQ.emplace_back(std::move(out));
-		if (n == waitingFrame) {
-			receiveCond.signal();
+		else {
+			yuy2_to_yc48(frame->yc, src, res.RowPitch, width, height, frame->w);
 		}
 	}
 
 public:
 	D3DVPAviUtlWork(VideoInfo srcvi, bool is420, int mode, int tff, int width, int height, int quality,
-		const std::string& deviceName, int reset, int debug,
+		const std::string& deviceName, int cache, int reset, int debug,
 		AviUtlErrorHandler* env)
 		: D3DVP(srcvi, is420 ? DXGI_FORMAT_NV12 : DXGI_FORMAT_YUY2,
-			mode, tff, width, height, quality, deviceName, reset, debug, env)
+			mode, tff, width, height, quality, deviceName, cache, reset, debug, env)
 		, is420(is420)
 	{
+		pool_.SetSetting(width, height);
 	}
 
 	~D3DVPAviUtlWork() {
-#if PRINT_WAIT
-		double proP, proC;
-		processThread.getTotalWait(proP, proC);
-		PRINTF("processThread: %f,%f\n", proP, proC);
-#endif
+		JoinThreads();
 	}
 
 	void GetFrame(FILTER *fp, FILTER_PROC_INFO *fpip, AviUtlErrorHandler* env) {
 		fp_ = fp;
 		fpip_ = fpip;
-
 		PutInputFrame(fpip->frame, env);
 		auto out = WaitFrame(fpip->frame, env);
-		D3D11_MAPPED_SUBRESOURCE res;
-		{
-			auto& lock = with(deviceLock);
-			COM_CHECK(devCtx->Map(out->tex, 0, D3D11_MAP_READ, 0, &res));
+		for (int y = 0; y < height; ++y) {
+			memcpy(fpip_->ycp_edit + fpip_->max_w * y, out->yc + out->w * y, width * sizeof(PIXEL_YC));
 		}
-
-		// YC48に変換
-		const uint8_t* srcY = reinterpret_cast<const uint8_t*>(res.pData);
-		if (is420) {
-			convert_format<NV12toYC48>(fpip_->ycp_temp, srcY, res.RowPitch, width, height, fpip_->max_w, fp_);
-		}
-		else {
-			convert_format<YUY2toYC48>(fpip_->ycp_temp, srcY, res.RowPitch, width, height, fpip_->max_w, fp_);
-		}
-
-#if COUNT_FRAMES
-		++cntFrom;
-#endif
-		{
-			auto& lock = with(deviceLock);
-			devCtx->Unmap(out->tex, 0);
-		}
-
 		fpip_->w = width;
 		fpip_->h = height;
-
-		// tempとeditを入れ替え
-		std::swap(fpip_->ycp_edit, fpip_->ycp_temp);
-
 		PRINTF("GetFrame Finished %d\n", fpip->frame);
 	}
 };
@@ -1807,7 +1718,8 @@ public:
 				fp->check[2] ? height : srcvi.height,
 				fp->track[0],
 				(gpuindex == -1) ? "" : deviceNames[gpuindex],
-				30, // reset: 32bitでメモリが少ないので小さめにする
+				15, // cache
+				4, // reset
 				fp->check[7],
 				&eh));
 			needSetFilter = true;
