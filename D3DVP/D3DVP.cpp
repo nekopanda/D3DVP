@@ -584,7 +584,13 @@ protected:
 			// D3D11デバイス作成
 			ID3D11Device* pDevice_;
 			ID3D11DeviceContext* pContext_;
-			const D3D_FEATURE_LEVEL featureLevels[] = { D3D_FEATURE_LEVEL_11_1 };
+			const D3D_FEATURE_LEVEL featureLevels[] = {
+				D3D_FEATURE_LEVEL_11_1,
+				D3D_FEATURE_LEVEL_11_0,
+				D3D_FEATURE_LEVEL_10_1,
+				D3D_FEATURE_LEVEL_10_0,
+				D3D_FEATURE_LEVEL_9_3,
+			};
 #ifndef _DEBUG
 			int flags = 0;
 #else
@@ -1163,7 +1169,16 @@ int		track_s[] = { 0, 32, 32, 0, 0 };	//	トラックバーの下限値
 int		track_e[] = { 2, 2200, 1200, 100, 100 };	//	トラックバーの上限値
 
 #define	CHECK_N	8													//	チェックボックスの数
-TCHAR	*check_name[] = { "2倍fps化（2倍fpsで入力してね）", "BFF", "リサイズ", "自動補正", "ノイズ除去", "エッジ強調", "YUV420で処理", "処理しない（デバッグ用）" };				//	チェックボックスの名前
+TCHAR	*check_name[] = {   //	チェックボックスの名前
+	"2倍fps化（2倍fpsで入力してね）", 
+	"BFF", 
+	"リサイズ", 
+	"自動補正", 
+	"ノイズ除去", 
+	"エッジ強調", 
+	"YUV420で処理（エラーが出る場合はチェックしてみて）", 
+	"処理しない（デバッグ用）"
+};
 int		check_default[] = { 0, 0, 0, 0, 0, 0, 0, 0 };				//	チェックボックスの初期値 (値は0か1)
 
 FILTER_DLL filter = {
