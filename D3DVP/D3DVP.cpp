@@ -176,6 +176,7 @@ protected:
 	DXGI_FORMAT format;
 	int mode, tff, quality;
 	std::string deviceName;
+	int deviceIndex;
 	int cacheFrames;
 	int resetFrames;
 	int numCache;
@@ -568,6 +569,7 @@ protected:
 
 		// アダプタ列挙
 		IDXGIAdapter * pAdapter_;
+		int dIndex = 0;
 		for (int i = 0; pFactory->EnumAdapters(i, &pAdapter_) != DXGI_ERROR_NOT_FOUND; ++i) {
 			auto pAdapter = make_com_ptr(pAdapter_);
 
@@ -579,6 +581,10 @@ protected:
 				if (memcmp(wname.data(), desc.Description, std::min(wname.size(), sizeof(desc.Description) / sizeof(desc.Description[0])))) {
 					continue;
 				}
+			}
+			if(dIndex != deviceIndex){
+				dIndex++;
+				continue;
 			}
 
 			// D3D11デバイス作成
@@ -781,7 +787,7 @@ protected:
 
 public:
 	D3DVP(VideoInfo srcvi, DXGI_FORMAT format, int mode, int tff, int width, int height, int quality,
-		const std::string& deviceName, int cache, int reset, int debug, ErrorHandler* env)
+		const std::string& deviceName, int deviceIndex, int cache, int reset, int debug, ErrorHandler* env)
 		: format(format)
 		, mode(mode)
 		, tff(tff)
@@ -789,6 +795,7 @@ public:
 		, height(height)
 		, quality(quality)
 		, deviceName(deviceName)
+		, deviceIndex(deviceIndex)
 		, cacheFrames(cache)
 		, resetFrames(reset)
 		, debug(debug)
@@ -802,6 +809,7 @@ public:
 		, nextInputFrame(INVALID_FRAME)
 		, ignoreFrames(0)
 	{
+		if (deviceIndex < 0) env->ThrowError("[D3DVP Error] deviceIndex must be >= 0");
 		if (mode != 0 && mode != 1) env->ThrowError("[D3DVP Error] mode must be 0 or 1");
 		if (quality < 0 || quality > 2) env->ThrowError("[D3DVP Error] quality must be between 0 and 2");
 		if (cache < 0) env->ThrowError("[D3DVP Error] cache must be >= 0");
@@ -1006,9 +1014,9 @@ class D3DVPAvsWorker : public D3DVP<PVideoFrame, IScriptEnvironment2>
 
 public:
 	D3DVPAvsWorker(PClip child, DXGI_FORMAT format, int mode, int tff, VideoInfo vi, int quality,
-		const std::string& deviceName, int cache, int reset, int debug,
+		const std::string& deviceName, int deviceIndex, int cache, int reset, int debug,
 		IScriptEnvironment2* env)
-		: D3DVP(child->GetVideoInfo(), format, mode, tff, vi.width, vi.height, quality, deviceName, cache, reset, debug, env)
+		: D3DVP(child->GetVideoInfo(), format, mode, tff, vi.width, vi.height, quality, deviceName, deviceIndex, cache, reset, debug, env)
 		, child(child)
 		, vi(vi)
 	{
@@ -1040,10 +1048,6 @@ public:
 	}
 };
 
-#ifndef _NDEBUG
-#include <DXGIDebug.h>
-#endif
-
 // AviSynth用トップレベルプラグインクラス
 class D3DVPAvs : public GenericVideoFilter
 {
@@ -1051,7 +1055,7 @@ class D3DVPAvs : public GenericVideoFilter
 	bool autop;
 	int nr, edge;
 	const std::string deviceName;
-	int cache, reset, debug;
+	int cache, reset, debug, deviceIndex;
 
 	std::unique_ptr<D3DVPAvsWorker> w;
 
@@ -1059,7 +1063,7 @@ class D3DVPAvs : public GenericVideoFilter
 		w = nullptr;
 		w = std::unique_ptr<D3DVPAvsWorker>(new D3DVPAvsWorker(child,
 			DXGI_FORMAT_NV12, mode,
-			tff, vi, quality, deviceName, cache, reset, debug, env));
+			tff, vi, quality, deviceName, deviceIndex, cache, reset, debug, env));
 		w->SetFilter(autop, nr, edge, env);
 	}
 
@@ -1081,7 +1085,7 @@ class D3DVPAvs : public GenericVideoFilter
 
 public:
 	D3DVPAvs(PClip child, int mode, int order, int width, int height, int quality,
-		bool autop, int nr, int edge, const std::string& deviceName, int cache, int reset, int debug,
+		bool autop, int nr, int edge, const std::string& deviceName, int deviceIndex, int cache, int reset, int debug,
 		IScriptEnvironment2* env)
 		: GenericVideoFilter(child)
 		, mode(mode)
@@ -1090,6 +1094,7 @@ public:
 		, nr(nr)
 		, edge(edge)
 		, deviceName(deviceName)
+		, deviceIndex(deviceIndex)
 		, cache(cache)
 		, reset(reset)
 		, debug(debug)
@@ -1137,9 +1142,10 @@ public:
 			args[7].AsInt(-1),    // nr
 			args[8].AsInt(-1),    // edge
 			args[9].AsString(""), // device
-			args[10].AsInt(15),   // cache
-			args[11].AsInt(4),   // reset
-			args[12].AsInt(0),    // debug
+			args[10].AsInt(0),
+			args[11].AsInt(15),   // cache
+			args[12].AsInt(4),   // reset
+			args[13].AsInt(0),    // debug
 			env);
 	}
 };
@@ -1150,7 +1156,7 @@ extern "C" __declspec(dllexport) const char* __stdcall AvisynthPluginInit3(IScri
 {
 	AVS_linkage = vectors;
 
-	env->AddFunction("D3DVP", "c[mode]i[order]i[width]i[height]i[quality]i[autop]b[nr]i[edge]i[device]s[cache]i[reset]i[debug]i", D3DVPAvs::Create, 0);
+	env->AddFunction("D3DVP", "c[mode]i[order]i[width]i[height]i[quality]i[autop]b[nr]i[edge]i[device]s[deviceIndex]i[cache]i[reset]i[debug]i", D3DVPAvs::Create, 0);
 
 	return "Direct3D VideoProcessing Plugin";
 }
@@ -1529,10 +1535,10 @@ class D3DVPAviUtlWork : public D3DVP<std::shared_ptr<AviUtlFrame>, AviUtlErrorHa
 
 public:
 	D3DVPAviUtlWork(VideoInfo srcvi, bool is420, int mode, int tff, int width, int height, int quality,
-		const std::string& deviceName, int cache, int reset, int debug,
+		int deviceIndex, int cache, int reset, int debug,
 		AviUtlErrorHandler* env)
 		: D3DVP(srcvi, is420 ? DXGI_FORMAT_NV12 : DXGI_FORMAT_YUY2,
-			mode, tff, width, height, quality, deviceName, cache, reset, debug, env)
+			mode, tff, width, height, quality, "", deviceIndex, cache, reset, debug, env)
 		, is420(is420)
 	{
 		pool_.SetSetting(width, height);
@@ -1632,7 +1638,7 @@ class D3DVPAviUtl
 
 public:
 	D3DVPAviUtl()
-		: gpuindex(-1)
+		: gpuindex(0)
 		, track_c()
 		, check_c()
 	{
@@ -1667,6 +1673,9 @@ public:
 			if (LOWORD(wparam) == ID_GPU_SELECT_COMBO) {
 				if (HIWORD(wparam) == CBN_SELENDOK) {
 					int index = (int)SendMessage(combo, CB_GETCURSEL, (WORD)0, 0L);
+					if (index == CB_ERR) {
+						index = 0;
+					}
 					if (gpuindex != index) {
 						gpuindex = index;
 						w = nullptr;
@@ -1716,7 +1725,7 @@ public:
 				fp->check[2] ? width : srcvi.width,
 				fp->check[2] ? height : srcvi.height,
 				fp->track[0],
-				(gpuindex == -1) ? "" : deviceNames[gpuindex],
+				gpuindex,
 				15, // cache
 				4, // reset
 				fp->check[7],
