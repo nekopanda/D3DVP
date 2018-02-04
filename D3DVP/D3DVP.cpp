@@ -228,9 +228,9 @@ protected:
 		T data;
 	};
 
-	class ToNV12Thread : public DataPumpThread<FrameData<FrameType>, ErrorHandler, PRINT_WAIT> {
+	class ToGPUThread : public DataPumpThread<FrameData<FrameType>, ErrorHandler, PRINT_WAIT> {
 	public:
-		ToNV12Thread(D3DVP* this_, ErrorHandler* env)
+		ToGPUThread(D3DVP* this_, ErrorHandler* env)
 			: DataPumpThread(NBUF_IN_FRAME - 2, env)
 			, this_(this_) { }
 	protected:
@@ -254,9 +254,9 @@ protected:
 		D3DVP* this_;
 	};
 
-	class FromNV12Thread : public DataPumpThread<FrameData<ID3D11Texture2D*>, ErrorHandler, PRINT_WAIT> {
+	class FromGPUThread : public DataPumpThread<FrameData<ID3D11Texture2D*>, ErrorHandler, PRINT_WAIT> {
 	public:
-		FromNV12Thread(D3DVP* this_, ErrorHandler* env)
+		FromGPUThread(D3DVP* this_, ErrorHandler* env)
 			: DataPumpThread(NBUF_OUT_TEX - 2, env)
 			, this_(this_) { }
 	protected:
@@ -268,9 +268,9 @@ protected:
 	};
 
 	bool joinCalled;
-	ToNV12Thread toGPUThread;
+	ToGPUThread toGPUThread;
 	ProcessThread processThread;
-	FromNV12Thread fromGPUThread;
+	FromGPUThread fromGPUThread;
 
 	virtual FrameType GetChildFrame(int n, ErrorHandler* env) = 0;
 	virtual FrameType NewVideoFrame(ErrorHandler* env) = 0;

@@ -22,7 +22,7 @@ D3DVP.dllをプラグインフォルダ（plugins+/plugins64+)にコピーして
 ## 関数
 
 D3DVP(clip, int "mode", int "order", int "width", int "height", int "quality", bool "autop",
-		int "nr", int "edge", string "device", int "cache", int "reset", int "debug")
+		int "nr", int "edge", string "device", int "deviceIndex", int "cache", int "reset", int "debug")
 
 	mode:
 		インタレ解除モード
@@ -75,6 +75,11 @@ D3DVP(clip, int "mode", int "order", int "width", int "height", int "quality", b
 		GPUのデバイス名はデバイスマネージャー等で確認してください。
 		例) "Intel", "NVIDIA", "Radeon"
 		デフォルト: ""（指定なし）
+
+	deviceIndex:
+		デバイス名にマッチするGPUが複数ある場合に、使用するGPUを指定します。
+		最初にマッチしたGPUが0、2番目にマッチしたGPUが1、・・・です。
+		デフォルト: 0
 
 	cache:
 		シーク時に処理してキャッシュする前方フレームの数です。
@@ -143,6 +148,7 @@ D3DVP(width=1280,height=720)
 D3DVP.aufをコピーしてください。「Direct3D 11インタレ解除」フィルタが追加されます。
 
 ※D3DVP.aufはD3DVP.dllをリネームしただけで中身は同じです。
+
 ※[Visual Studio 2015ランタイム](https://www.microsoft.com/ja-jp/download/details.aspx?id=48145)に依存しています。インストールしていない場合は、インストールしてください。
 
 ## パラメータ
