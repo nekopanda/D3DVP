@@ -366,7 +366,6 @@ protected:
 					// streamçÏê¨
 					D3D11_VIDEO_PROCESSOR_STREAM stream = { 0 };
 					stream.Enable = TRUE;
-					stream.pInputSurface = inputViews[0].get();
 					stream.PastFrames = rccaps.PastFrames;
 					stream.FutureFrames = rccaps.FutureFrames;
 
@@ -1383,21 +1382,6 @@ struct AviUtlErrorHandler {
 	}
 };
 
-class SectionTime {
-	int64_t prev;
-public:
-	SectionTime() {
-		QueryPerformanceCounter((LARGE_INTEGER*)&prev);
-	}
-	~SectionTime() {
-		int64_t now, freq;
-		QueryPerformanceCounter((LARGE_INTEGER*)&now);
-		QueryPerformanceFrequency((LARGE_INTEGER*)&freq);
-		double avg = (double)(now - prev) / freq * 1000.0;
-		PRINTF("%f ms\n", avg);
-	}
-};
-
 struct FramePool {
 	int w_, h_;
 	std::vector<PIXEL_YC*> pool_;
@@ -1803,7 +1787,6 @@ BOOL func_save_end(FILTER *fp, void *editp)
 BOOL func_proc(FILTER *fp, FILTER_PROC_INFO *fpip)
 {
 	try {
-		SectionTime timer;
 		g_filter->Proc(fp, fpip, 0);
 		return TRUE;
 	}
