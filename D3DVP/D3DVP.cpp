@@ -1262,7 +1262,7 @@ T clamp(T n, T min, T max)
 	return n < min ? min : n;
 }
 
-void yc48_to_yuy2(uint8_t* dst, int pitch, const PIXEL_YC* src, int w, int h, int max_w) {
+void yc48_to_yuy2_c(uint8_t* dst, int pitch, const PIXEL_YC* src, int w, int h, int max_w) {
 	uint8_t* dstptr = dst;
 
 	for (int y = 0; y < h; ++y) {
@@ -1285,7 +1285,7 @@ void yc48_to_yuy2(uint8_t* dst, int pitch, const PIXEL_YC* src, int w, int h, in
 	}
 }
 
-void yc48_to_nv12(uint8_t* dst, int pitch, const PIXEL_YC* src, int w, int h, int max_w) {
+void yc48_to_nv12_c(uint8_t* dst, int pitch, const PIXEL_YC* src, int w, int h, int max_w) {
 	uint8_t* dstY = dst;
 	uint8_t* dstUV = dstY + h * pitch;
 
@@ -1313,7 +1313,10 @@ void yc48_to_nv12(uint8_t* dst, int pitch, const PIXEL_YC* src, int w, int h, in
 	}
 }
 
-void yuy2_to_yc48(PIXEL_YC* dst, const uint8_t* src, int pitch, int w, int h, int max_w) {
+void yc48_to_yuy2_avx2(uint8_t* dst, int pitch, const PIXEL_YC* src, int w, int h, int max_w);
+void yc48_to_nv12_avx2(uint8_t* dst, int pitch, const PIXEL_YC* src, int w, int h, int max_w);
+
+void yuy2_to_yc48_c(PIXEL_YC* dst, const uint8_t* src, int pitch, int w, int h, int max_w) {
 	const uint8_t* srcptr = src;
 
 	for (int y = 0; y < h; ++y) {
@@ -1352,7 +1355,7 @@ void yuy2_to_yc48(PIXEL_YC* dst, const uint8_t* src, int pitch, int w, int h, in
 	}
 }
 
-void nv12_to_yc48(PIXEL_YC* dst, const uint8_t* src, int pitch, int w, int h, int max_w) {
+void nv12_to_yc48_c(PIXEL_YC* dst, const uint8_t* src, int pitch, int w, int h, int max_w) {
 	const uint8_t* srcY = src;
 	const uint8_t* srcUV = srcY + h * pitch;
 
@@ -1391,6 +1394,9 @@ void nv12_to_yc48(PIXEL_YC* dst, const uint8_t* src, int pitch, int w, int h, in
 		dst[w - 1 + y * max_w].cr = cr0;
 	}
 }
+
+void yuy2_to_yc48_avx2(PIXEL_YC* dst, const uint8_t* src, int pitch, int w, int h, int max_w);
+void nv12_to_yc48_avx2(PIXEL_YC* dst, const uint8_t* src, int pitch, int w, int h, int max_w);
 
 struct AviUtlErrorHandler {
 	void ThrowError(const char* str) {
@@ -1476,6 +1482,11 @@ class D3DVPAviUtlWork : public D3DVP<std::shared_ptr<AviUtlFrame>, AviUtlErrorHa
 
 	FramePool pool_;
 
+	void (*nv12_to_yc48)(PIXEL_YC* dst, const uint8_t* src, int pitch, int w, int h, int max_w);
+	void (*yuy2_to_yc48)(PIXEL_YC* dst, const uint8_t* src, int pitch, int w, int h, int max_w);
+	void (*yc48_to_nv12)(uint8_t* dst, int pitch, const PIXEL_YC* src, int w, int h, int max_w);
+	void (*yc48_to_yuy2)(uint8_t* dst, int pitch, const PIXEL_YC* src, int w, int h, int max_w);
+
 	std::shared_ptr<AviUtlFrame> NewVideoFrame(AviUtlErrorHandler* env)
 	{
 		return std::make_shared<AviUtlFrame>(pool_.Alloc(width, height), width, height, &pool_);
@@ -1542,6 +1553,17 @@ public:
 		, is420(is420)
 	{
 		pool_.SetSetting(width, height);
+		if (CPUID().AVX2()) {
+			yc48_to_nv12 = yc48_to_nv12_avx2;
+			yc48_to_yuy2 = yc48_to_yuy2_avx2;
+			nv12_to_yc48 = nv12_to_yc48_avx2;
+			yuy2_to_yc48 = yuy2_to_yc48_avx2;
+		} else {
+			yc48_to_nv12 = yc48_to_nv12_c;
+			yc48_to_yuy2 = yc48_to_yuy2_c;
+			nv12_to_yc48 = nv12_to_yc48_c;
+			yuy2_to_yc48 = yuy2_to_yc48_c;
+		}
 	}
 
 	~D3DVPAviUtlWork() {
