@@ -1,4 +1,9 @@
 
+
+#define NOMINMAX
+#include <Windows.h>
+#include "filter.h"
+
 #include <stdint.h>
 #include <string.h>
 
@@ -77,10 +82,6 @@ void nv12_to_yuv_avx2(
 		}
 	}
 }
-
-#define NOMINMAX
-#include <Windows.h>
-#include "filter.h"
 
 #define MM_ABS(x) (((x) < 0) ? -(x) : (x))
 #define _mm256_alignr256_epi8(a, b, i) \

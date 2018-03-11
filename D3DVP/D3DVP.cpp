@@ -29,7 +29,7 @@
 #define COUNT_FRAMES 0
 #define PRINT_WAIT true
 
-#if 0 // デバッグ用（本番はOFFにする）
+#if 1 // デバッグ用（本番はOFFにする）
 #define PRINTF(...) printf(__VA_ARGS__)
 #else
 #define PRINTF(...)
@@ -158,6 +158,11 @@ public:
 		}
 	}
 	bool AVX2(void) { return avx2Enabled; }
+};
+
+enum BorderFrame {
+	BORDER_COPY,
+	BORDER_BLANK,
 };
 
 // 処理の共通部分を実装したクラス
@@ -963,6 +968,10 @@ class D3DVPAvsWorker : public D3DVP<PVideoFrame, IScriptEnvironment2>
 	int logUVx;
 	int logUVy;
 
+	BorderFrame border;
+	PVideoFrame blankFrame;
+	int adjustFrames;
+
 	void(*yuv_to_nv12)(
 		int height, int width,
 		uint8_t* dst, int dstPitch,
@@ -976,7 +985,14 @@ class D3DVPAvsWorker : public D3DVP<PVideoFrame, IScriptEnvironment2>
 		const uint8_t* src, int srcPitch);
 
 	PVideoFrame GetChildFrame(int n, IScriptEnvironment2* env) {
-		n = std::max(0, std::min(srcvi.num_frames - 1, n));
+		if (border == BORDER_BLANK) {
+			if (n < 0 || n >= srcvi.num_frames) {
+				return blankFrame;
+			}
+		}
+		else { // BORDER_COPY
+			n = std::max(0, std::min(srcvi.num_frames - 1, n));
+		}
 		return child->GetFrame(n, env);
 	}
 
@@ -1009,16 +1025,50 @@ class D3DVPAvsWorker : public D3DVP<PVideoFrame, IScriptEnvironment2>
 		nv12_to_yuv(height, width, dstY, dstU, dstV, pitchY, pitchUV, srcY, srcPitch);
 	}
 
+	PVideoFrame NewBlankFrame(IScriptEnvironment2* env)
+	{
+		PVideoFrame dst = env->NewVideoFrame(srcvi);
+
+		pixel_t* dstY = reinterpret_cast<pixel_t*>(dst->GetWritePtr(PLANAR_Y));
+		pixel_t* dstU = reinterpret_cast<pixel_t*>(dst->GetWritePtr(PLANAR_U));
+		pixel_t* dstV = reinterpret_cast<pixel_t*>(dst->GetWritePtr(PLANAR_V));
+		int pitchY = dst->GetPitch(PLANAR_Y) / sizeof(pixel_t);
+		int pitchUV = dst->GetPitch(PLANAR_U) / sizeof(pixel_t);
+		int logUVx = srcvi.GetPlaneWidthSubsampling(PLANAR_U);
+		int logUVy = srcvi.GetPlaneHeightSubsampling(PLANAR_U);
+		int widthUV = srcvi.width >> logUVx;
+		int heightUV = srcvi.height >> logUVy;
+
+		const int black[] = { 0, 128, 128 };
+
+		for (int y = 0; y < srcvi.height; ++y) {
+			for (int x = 0; x < srcvi.width; ++x) {
+				dstY[x + y * pitchY] = black[0];
+			}
+		}
+
+		for (int y = 0; y < heightUV; ++y) {
+			for (int x = 0; x < widthUV; ++x) {
+				dstU[x + y * pitchUV] = black[1];
+				dstV[x + y * pitchUV] = black[2];
+			}
+		}
+
+		return dst;
+	}
+
 	int cacheStartFrame; // 出力フレーム番号
 	int nextInputFrame;  // 入力フレーム番号
 
 public:
 	D3DVPAvsWorker(PClip child, DXGI_FORMAT format, int mode, int tff, VideoInfo vi, int quality,
-		const std::string& deviceName, int deviceIndex, int cache, int reset, int debug,
+		const std::string& deviceName, int deviceIndex, int cache, int reset, BorderFrame border, int adjust, int debug,
 		IScriptEnvironment2* env)
 		: D3DVP(child->GetVideoInfo(), format, mode, tff, vi.width, vi.height, quality, deviceName, deviceIndex, cache, reset, debug, env)
 		, child(child)
 		, vi(vi)
+		, border(border)
+		, adjustFrames(adjust)
 	{
 #if COUNT_FRAMES
 		cntTo = 0;
@@ -1036,6 +1086,8 @@ public:
 			yuv_to_nv12 = yuv_to_nv12_c;
 			nv12_to_yuv = nv12_to_yuv_c;
 		}
+
+		blankFrame = NewBlankFrame(env);
 	}
 
 	~D3DVPAvsWorker() {
@@ -1043,8 +1095,8 @@ public:
 	}
 
 	PVideoFrame GetFrame(int n, IScriptEnvironment2* env) {
-		PutInputFrame(n, env);
-		return WaitFrame(n, env);
+		PutInputFrame(n + adjustFrames, env);
+		return WaitFrame(n + adjustFrames, env);
 	}
 };
 
@@ -1055,7 +1107,8 @@ class D3DVPAvs : public GenericVideoFilter
 	bool autop;
 	int nr, edge;
 	const std::string deviceName;
-	int cache, reset, debug, deviceIndex;
+	BorderFrame border;
+	int cache, reset, adjust, debug, deviceIndex;
 
 	std::unique_ptr<D3DVPAvsWorker> w;
 
@@ -1063,7 +1116,7 @@ class D3DVPAvs : public GenericVideoFilter
 		w = nullptr;
 		w = std::unique_ptr<D3DVPAvsWorker>(new D3DVPAvsWorker(child,
 			DXGI_FORMAT_NV12, mode,
-			tff, vi, quality, deviceName, deviceIndex, cache, reset, debug, env));
+			tff, vi, quality, deviceName, deviceIndex, cache, reset, border, adjust, debug, env));
 		w->SetFilter(autop, nr, edge, env);
 	}
 
@@ -1085,7 +1138,8 @@ class D3DVPAvs : public GenericVideoFilter
 
 public:
 	D3DVPAvs(PClip child, int mode, int order, int width, int height, int quality,
-		bool autop, int nr, int edge, const std::string& deviceName, int deviceIndex, int cache, int reset, int debug,
+		bool autop, int nr, int edge, const std::string& deviceName, int deviceIndex,
+		int cache, int reset, const std::string& border, int adjust, int debug,
 		IScriptEnvironment2* env)
 		: GenericVideoFilter(child)
 		, mode(mode)
@@ -1097,6 +1151,7 @@ public:
 		, deviceIndex(deviceIndex)
 		, cache(cache)
 		, reset(reset)
+		, adjust(adjust)
 		, debug(debug)
 	{
 		if (mode != 0 && mode != 1) env->ThrowError("[D3DVP Error] mode must be 0 or 1");
@@ -1107,6 +1162,16 @@ public:
 		if (edge < -1 || edge > 100) env->ThrowError("D3DVP Error] edge must be in range 0-100, or -1 to disable");
 
 		tff = (order == -1) ? child->GetParity(0) : (order != 0);
+
+		if (border == "copy") {
+			this->border = BORDER_COPY;
+		}
+		else if (border == "blank") {
+			this->border = BORDER_BLANK;
+		}
+		else {
+			env->ThrowError("[D3DVP Error] border must be copy or blank");
+		}
 		
 		vi.width = (width > 0) ? width : vi.width;
 		vi.height = (height > 0) ? height : vi.height;
@@ -1145,7 +1210,9 @@ public:
 			args[10].AsInt(0),
 			args[11].AsInt(15),   // cache
 			args[12].AsInt(4),   // reset
-			args[13].AsInt(0),    // debug
+			args[13].AsString("copy"),   // border
+			args[14].AsInt(0),   // adjust
+			args[15].AsInt(0),    // debug
 			env);
 	}
 };
@@ -1156,7 +1223,7 @@ extern "C" __declspec(dllexport) const char* __stdcall AvisynthPluginInit3(IScri
 {
 	AVS_linkage = vectors;
 
-	env->AddFunction("D3DVP", "c[mode]i[order]i[width]i[height]i[quality]i[autop]b[nr]i[edge]i[device]s[deviceIndex]i[cache]i[reset]i[debug]i", D3DVPAvs::Create, 0);
+	env->AddFunction("D3DVP", "c[mode]i[order]i[width]i[height]i[quality]i[autop]b[nr]i[edge]i[device]s[deviceIndex]i[cache]i[reset]i[border]s[adjust]i[debug]i", D3DVPAvs::Create, 0);
 
 	return "Direct3D VideoProcessing Plugin";
 }
@@ -1168,11 +1235,11 @@ extern "C" __declspec(dllexport) const char* __stdcall AvisynthPluginInit3(IScri
 //---------------------------------------------------------------------
 //		フィルタ構造体定義
 //---------------------------------------------------------------------
-#define	TRACK_N	5													//	トラックバーの数
-TCHAR	*track_name[] = { "品質", "幅", "高さ", "NR", "EDGE" };	//	トラックバーの名前
-int		track_default[] = { 2, 32, 32, 0, 0 };	//	トラックバーの初期値
-int		track_s[] = { 0, 32, 32, 0, 0 };	//	トラックバーの下限値
-int		track_e[] = { 2, 2200, 1200, 100, 100 };	//	トラックバーの上限値
+#define	TRACK_N	6													//	トラックバーの数
+TCHAR	*track_name[] = { "品質", "幅", "高さ", "NR", "EDGE", "調整" };	//	トラックバーの名前
+int		track_default[] = { 2, 32, 32, 0, 0, 0 };	//	トラックバーの初期値
+int		track_s[] = { 0, 32, 32, 0, 0, -5 };	//	トラックバーの下限値
+int		track_e[] = { 2, 2200, 1200, 100, 100, 5 };	//	トラックバーの上限値
 
 #define	CHECK_N	8													//	チェックボックスの数
 TCHAR	*check_name[] = {   //	チェックボックスの名前
@@ -1243,7 +1310,7 @@ static void init_console()
 //---------------------------------------------------------------------
 EXTERN_C __declspec(dllexport) FILTER_DLL * __stdcall GetFilterTable(void)
 {
-	//init_console();
+	init_console();
 	return &filter;
 }
 //	下記のようにすると1つのaufファイルで複数のフィルタ構造体を渡すことが出来ます
@@ -1392,6 +1459,20 @@ void nv12_to_yc48_c(PIXEL_YC* dst, const uint8_t* src, int pitch, int w, int h, 
 		}
 		dst[w - 1 + y * max_w].cb = cb0;
 		dst[w - 1 + y * max_w].cr = cr0;
+	}
+
+	// y方向補間
+	for (int y = 1; y + 1 < h; y += 2) {
+		for (int x = 0; x < w; ++x) {
+			short cb0 = dst[x + (y + 0) * max_w].cb;
+			short cr0 = dst[x + (y + 0) * max_w].cr;
+			short cb1 = dst[x + (y + 1) * max_w].cb;
+			short cr1 = dst[x + (y + 1) * max_w].cr;
+			dst[x + (y + 0) * max_w].cb = (cb0 * 3 + cb1 + 2) >> 2;
+			dst[x + (y + 0) * max_w].cr = (cr0 * 3 + cr1 + 2) >> 2;
+			dst[x + (y + 1) * max_w].cb = (cb0 + cb1 * 3 + 2) >> 2;
+			dst[x + (y + 1) * max_w].cr = (cr0 + cr1 * 3 + 2) >> 2;
+		}
 	}
 }
 
@@ -1553,6 +1634,14 @@ public:
 		, is420(is420)
 	{
 		pool_.SetSetting(width, height);
+#if 1 // デバッグ用
+		yc48_to_nv12 = yc48_to_nv12_c;
+		yc48_to_yuy2 = yc48_to_yuy2_c;
+		nv12_to_yc48 = nv12_to_yc48_c;
+		yuy2_to_yc48 = yuy2_to_yc48_c;
+
+		yc48_to_yuy2 = yc48_to_yuy2_avx2;
+#else
 		if (CPUID().AVX2()) {
 			yc48_to_nv12 = yc48_to_nv12_avx2;
 			yc48_to_yuy2 = yc48_to_yuy2_avx2;
@@ -1564,17 +1653,18 @@ public:
 			nv12_to_yc48 = nv12_to_yc48_c;
 			yuy2_to_yc48 = yuy2_to_yc48_c;
 		}
+#endif
 	}
 
 	~D3DVPAviUtlWork() {
 		JoinThreads();
 	}
 
-	void GetFrame(FILTER *fp, FILTER_PROC_INFO *fpip, AviUtlErrorHandler* env) {
+	void GetFrame(FILTER *fp, FILTER_PROC_INFO *fpip, int adjust, AviUtlErrorHandler* env) {
 		fp_ = fp;
 		fpip_ = fpip;
-		PutInputFrame(fpip->frame, env);
-		auto out = WaitFrame(fpip->frame, env);
+		PutInputFrame(fpip->frame + adjust, env);
+		auto out = WaitFrame(fpip->frame + adjust, env);
 		for (int y = 0; y < height; ++y) {
 			memcpy(fpip_->ycp_edit + fpip_->max_w * y, out->yc + out->w * y, width * sizeof(PIXEL_YC));
 		}
@@ -1767,7 +1857,7 @@ public:
 		StoreSetting(fp);
 
 		try {
-			w->GetFrame(fp, fpip, &eh);
+			w->GetFrame(fp, fpip, fp->track[5] , &eh);
 		}
 		catch (const std::string&) {
 			if (retry > 2) {
