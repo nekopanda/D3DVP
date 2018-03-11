@@ -174,9 +174,11 @@
       <EnableEnhancedInstructionSet Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">AdvancedVectorExtensions2</EnableEnhancedInstructionSet>
       <EnableEnhancedInstructionSet Condition="'$(Configuration)|$(Platform)'=='Release|x64'">AdvancedVectorExtensions2</EnableEnhancedInstructionSet>
     </ClCompile>
+    <ClCompile Include="convert_c.cpp" />
     <ClCompile Include="D3DVP.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="convert.h" />
     <ClInclude Include="Thread.hpp" />
   </ItemGroup>
   <ItemGroup>
