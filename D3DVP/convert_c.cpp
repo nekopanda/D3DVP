@@ -128,8 +128,8 @@ void yuy2_to_yc48_c(PIXEL_YC* dst, const uint8_t* src, int pitch, int w, int h, 
 
 			short y0 = ((Y0 * 1197) >> 6) - 299;
 			short y1 = ((Y1 * 1197) >> 6) - 299;
-			short cb = ((U - 128) * 4681 + 164) >> 8;
-			short cr = ((V - 128) * 4681 + 164) >> 8;
+			short cb = (U * 4682 - (4681 << 7)) >> 8;
+			short cr = (V * 4682 - (4681 << 7)) >> 8;
 
 			dst[x + y * max_w].y = y0;
 			dst[x + 1 + y * max_w].y = y1;

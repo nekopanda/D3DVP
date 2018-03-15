@@ -225,14 +225,17 @@ static __forceinline void gather_y_u_v_from_yc48(__m256i& y0, __m256i& y1, __m25
 
 static __forceinline void yc48_to_yuy2_avx2_block(uint8_t *dst, const PIXEL_YC *ycp) {
 	const __m256i yC_YCC = _mm256_set1_epi32(1<<LSFT_YCC_8);
+	const __m256i yuyShuffle = _mm256_setr_epi8(
+		0, 8, 1, 9, 2, 10, 3, 11, 4, 12, 5, 13, 6, 14, 7, 15,
+		0, 8, 1, 9, 2, 10, 3, 11, 4, 12, 5, 13, 6, 14, 7, 15);
 	__m256i y1 = _mm256_loadu_si256((const __m256i *)((const uint8_t *)ycp +  0));
 	__m256i y2 = _mm256_loadu_si256((const __m256i *)((const uint8_t *)ycp + 32));
 	__m256i y3 = _mm256_loadu_si256((const __m256i *)((const uint8_t *)ycp + 64));
 	gather_y_uv_from_yc48(y1, y2, y3);
 	y1 = convert_y_range_from_yc48(y1, yC_Y_L_MA_8, Y_L_RSH_8, yC_YCC);
 	y2 = convert_uv_range_from_yc48(y2, _mm256_set1_epi16(UV_OFFSET_x1), yC_UV_L_MA_8_444, UV_L_RSH_8_444, yC_YCC);
-	y2 = _mm256_slli_epi16(y2, 8);
-	y1 = _mm256_or_si256(y1, y2);
+	y1 = _mm256_packus_epi16(y1, y2);
+	y1 = _mm256_shuffle_epi8(y1, yuyShuffle);
 	_mm256_storeu_si256((__m256i *)dst, y1);
 }
 

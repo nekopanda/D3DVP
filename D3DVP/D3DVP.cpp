@@ -28,7 +28,7 @@
 #define COUNT_FRAMES 0
 #define PRINT_WAIT true
 
-#if 1 // デバッグ用（本番はOFFにする）
+#if 0 // デバッグ用（本番はOFFにする）
 #define PRINTF(...) printf(__VA_ARGS__)
 #else
 #define PRINTF(...)
@@ -1245,7 +1245,7 @@ static void init_console()
 //---------------------------------------------------------------------
 EXTERN_C __declspec(dllexport) FILTER_DLL * __stdcall GetFilterTable(void)
 {
-	init_console();
+	//init_console();
 	return &filter;
 }
 //	下記のようにすると1つのaufファイルで複数のフィルタ構造体を渡すことが出来ます
@@ -1419,14 +1419,6 @@ public:
 		, is420(is420)
 	{
 		pool_.SetSetting(width, height);
-#if 1 // デバッグ用
-		yc48_to_nv12 = yc48_to_nv12_c;
-		yc48_to_yuy2 = yc48_to_yuy2_c;
-		nv12_to_yc48 = nv12_to_yc48_c;
-		yuy2_to_yc48 = yuy2_to_yc48_c;
-
-		yc48_to_yuy2 = yc48_to_yuy2_avx2;
-#else
 		if (CPUID().AVX2()) {
 			yc48_to_nv12 = yc48_to_nv12_avx2;
 			yc48_to_yuy2 = yc48_to_yuy2_avx2;
@@ -1438,7 +1430,6 @@ public:
 			nv12_to_yc48 = nv12_to_yc48_c;
 			yuy2_to_yc48 = yuy2_to_yc48_c;
 		}
-#endif
 	}
 
 	~D3DVPAviUtlWork() {
