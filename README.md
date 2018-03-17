@@ -22,7 +22,7 @@ D3DVP.dllをプラグインフォルダ（plugins+/plugins64+)にコピーして
 ## 関数
 
 D3DVP(clip, int "mode", int "order", int "width", int "height", int "quality", bool "autop",
-		int "nr", int "edge", string "device", int "deviceIndex", int "cache", int "reset", int "debug")
+		int "nr", int "edge", string "device", int "deviceIndex", int "cache", int "reset", string "border", int "adjust", int "debug")
 
 	mode:
 		インタレ解除モード
@@ -97,6 +97,22 @@ D3DVP(clip, int "mode", int "order", int "width", int "height", int "quality", b
 		その枚数の指定です。
 		デフォルト: 4
 
+	border:
+		先頭のフレームより前と、最後のフレームより後ろの
+		存在しないフレームをどう与えるかを制御
+		- "copy": 先頭より前は先頭フレーム、最後より後ろは最後のフレームとします。
+				  先頭と最後のフレームがインタレ解除できない可能性があります。
+		- "blank": 存在しないフレームは黒１色のフレームにします。
+		デフォルト: "copy"
+
+	adjust:
+		フレーム番号を指定した値だけ補正します。
+		一部のドライバで出力フレームが遅れてたりするので、その補正用。
+		だいたい以下のようにすればOK？（設定やバージョンによって変わるかも）
+		Intel, NVIDIA(mode=1): 1（1フレーム遅れ）
+		Radeon, NVIDIA(mode=0): 0（ずれなし）
+		デフォルト: 0
+
 	debug:
 		デバッグ用です。
 		1にすると処理をバイパスしてフレームをコピーします。
@@ -166,6 +182,10 @@ D3DVP.aufをコピーしてください。「Direct3D 11インタレ解除」フ
 
 * EDGE
    * エッジ強調の強度。「エッジ強調」にチェックした場合のみ有効
+
+* 調整
+   * フレーム番号を指定した値だけ補正する。
+		一部のドライバで出力フレームが遅れてたりするので、その補正用。
 
 * 2倍fps化
    * bobでインタレ解除します。
