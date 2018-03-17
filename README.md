@@ -140,9 +140,9 @@ D3DVP()
 # IntelとNVIDIAとRadeonのインタレ解除を比較
 srcfile="..."
 LWLibavVideoSource(srcfile)
-intel = D3DVP(device="Intel")
-nvidia = D3DVP(device="NVIDIA")
-radeon = D3DVP(device="Radeon")
+intel = D3DVP(device="Intel",border="blank",adjust=1)
+nvidia = D3DVP(device="NVIDIA",border="blank",adjust=1)
+radeon = D3DVP(device="Radeon",border="blank")
 Interleave(intel.subtitle("Intel"),nvidia.subtitle("NVIDIA"),radeon.subtitle("radeon"))
 ```
 
