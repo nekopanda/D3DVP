@@ -1184,7 +1184,7 @@ TCHAR	*check_name[] = {   //	チェックボックスの名前
 	"自動補正", 
 	"ノイズ除去", 
 	"エッジ強調", 
-	"YUV420で処理（エラーが出る場合はチェックしてみて）", 
+	"YUV420で処理（Radeonとか）", 
 	"処理しない（デバッグ用）"
 };
 int		check_default[] = { 0, 0, 0, 0, 0, 0, 0, 0 };				//	チェックボックスの初期値 (値は0か1)
@@ -1209,7 +1209,7 @@ FILTER_DLL filter = {
 															//	FILTER_FLAG_WINDOW_VSCROLL		: 垂直スクロールバーを持つウィンドウを作ります
 															//	FILTER_FLAG_IMPORT				: インポートメニューを作ります
 															//	FILTER_FLAG_EXPORT				: エクスポートメニューを作ります
-															320,380,						//	設定ウインドウのサイズ (FILTER_FLAG_WINDOW_SIZEが立っている時に有効)
+															320,400,						//	設定ウインドウのサイズ (FILTER_FLAG_WINDOW_SIZEが立っている時に有効)
 															"Direct3D 11インタレ解除",			//	フィルタの名前
 															TRACK_N,					//	トラックバーの数 (0なら名前初期値等もNULLでよい)
 															track_name,					//	トラックバーの名前郡へのポインタ
@@ -1495,13 +1495,13 @@ class D3DVPAviUtl
 		CreateWindow(
 			TEXT("STATIC"), "使用GPU",
 			WS_CHILD | WS_VISIBLE,
-			10, 300, 300, 20,
+			10, 320, 300, 20,
 			hwnd, NULL, NULL, NULL);
 
 		combo = CreateWindow(
 			TEXT("COMBOBOX"), NULL,
 			WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
-			10, 320, 300, 300, hwnd, (HMENU)ID_GPU_SELECT_COMBO, NULL, NULL
+			10, 340, 300, 300, hwnd, (HMENU)ID_GPU_SELECT_COMBO, NULL, NULL
 		);
 		for (int i = 0; i < (int)deviceNames.size(); i++) {
 			SendMessage(combo, CB_ADDSTRING, 0, (LPARAM)deviceNames[i].c_str());

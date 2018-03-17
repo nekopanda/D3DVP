@@ -108,10 +108,17 @@ alignas(32) static const uint8_t ARRAY_SUFFLE_YCP_Y[32] = {
 	0, 1, 6, 7, 12, 13, 2, 3, 8, 9, 14, 15, 4, 5, 10, 11
 };
 
+#if 0 // LoadLibrary‚ÉAVX–½—ß‚ªÀs‚³‚ê‚Ä‚µ‚Ü‚¤‚Ì‚Åƒ_ƒ
 static const __m256i yC_Y_L_MA_8       = _mm256_set1_epi32((Y_L_ADD_8 << 16) | Y_L_MUL);
 static const __m256i yC_UV_L_MA_8_444  = _mm256_set1_epi32((UV_L_ADD_8_444 << 16) | UV_L_MUL);
 static const __m256i yC_Y_L_MA_16      = _mm256_set1_epi32((Y_L_ADD_16 << 16) | Y_L_MUL);
 static const __m256i yC_UV_L_MA_16_444 = _mm256_set1_epi32((UV_L_ADD_16_444 << 16) | UV_L_MUL);
+#else
+#define yC_Y_L_MA_8 _mm256_set1_epi32((Y_L_ADD_8 << 16) | Y_L_MUL)
+#define yC_UV_L_MA_8_444 _mm256_set1_epi32((UV_L_ADD_8_444 << 16) | UV_L_MUL)
+#define yC_Y_L_MA_16 _mm256_set1_epi32((Y_L_ADD_16 << 16) | Y_L_MUL)
+#define yC_UV_L_MA_16_444 _mm256_set1_epi32((UV_L_ADD_16_444 << 16) | UV_L_MUL)
+#endif
 
 static __forceinline void gather_y_uv_from_yc48(__m256i& y0, __m256i& y1, __m256i y2) {
 	const int MASK_INT_Y  = 0x80 + 0x10 + 0x02;
