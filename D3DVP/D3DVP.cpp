@@ -935,6 +935,13 @@ class D3DVPAvsWorker : public D3DVP<PVideoFrame, IScriptEnvironment2>
 
 	PVideoFrame NewVideoFrame(IScriptEnvironment2* env)
 	{
+    PNeoEnv neo = env;
+    if (neo) {
+      // Neoの場合は、CPUデバイスを指定して確保する
+      //（GetFrame外のスレッドから呼び出しているので、
+      //  カレントデバイスがCPUでない場合があるので）
+      return neo->NewVideoFrame(vi, neo->GetDevice(DEV_TYPE_CPU, 0));
+    }
 		return env->NewVideoFrame(vi);
 	}
 
