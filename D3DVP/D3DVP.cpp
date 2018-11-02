@@ -161,6 +161,7 @@ protected:
 		ErrorHandler* env;
 		std::exception_ptr exception;
 		bool reset;
+		bool thread;
 		int n;
 	};
 
@@ -255,7 +256,12 @@ protected:
 			}
 		}
 
-		processThread.put(std::move(out));
+		if (out.thread) {
+			processThread.put(std::move(out));
+		}
+		else {
+			processReceived(std::move(out));
+		}
 	}
 
 	// processReceived用データ
@@ -344,9 +350,9 @@ protected:
 						}
 						{
 							auto& lock = with(outputTexPoolLock);
-								out.data = outputTexPool.back();
-								outputTexPool.pop_back();
-							}
+							out.data = outputTexPool.back();
+							outputTexPool.pop_back();
+						}
 
 						{
 							auto& lock = with(deviceLock);
@@ -357,7 +363,12 @@ protected:
 						// 下流に渡す
 						out.n = (data.n - rccaps.FutureFrames) * numFields + parity;
 						out.reset = resetOutput;
-						fromGPUThread.put(std::move(out));
+						if (out.thread) {
+							fromGPUThread.put(std::move(out));
+						}
+						else {
+							fromNV12Received(std::move(out));
+						}
 
 						resetOutput = false;
 						if (++nextOutputTex >= (int)texOutput.size()) {
@@ -436,7 +447,7 @@ protected:
 	int nextInputFrame;  // 入力フレーム番号
 	int ignoreFrames;    // 次にWaitFrameした時に無視するフレーム数（リセットのため）
 
-	void PutInputFrame(int n, ErrorHandler* env) {
+	void PutInputFrame(int n, bool thread, ErrorHandler* env) {
 		int numFields = NumFramesPerBlock();
 		int procAhead = NumFramesProcAhead();
 		bool reset = false;
@@ -462,9 +473,15 @@ protected:
 			FrameData<FrameType> data;
 			data.env = env;
 			data.reset = reset;
+			data.thread = thread;
 			data.n = i;
 			data.data = GetChildFrame(i, env);
-			toGPUThread.put(std::move(data));
+			if (data.thread) {
+				toGPUThread.put(std::move(data));
+			}
+			else {
+				toNV12Received(std::move(data));
+			}
 		}
 	}
 
@@ -524,7 +541,7 @@ protected:
 					continue;
 				}
 			}
-			if(dIndex != deviceIndex){
+			if (dIndex != deviceIndex) {
 				dIndex++;
 				continue;
 			}
@@ -935,13 +952,13 @@ class D3DVPAvsWorker : public D3DVP<PVideoFrame, IScriptEnvironment2>
 
 	PVideoFrame NewVideoFrame(IScriptEnvironment2* env)
 	{
-    PNeoEnv neo = env;
-    if (neo) {
-      // Neoの場合は、CPUデバイスを指定して確保する
-      //（GetFrame外のスレッドから呼び出しているので、
-      //  カレントデバイスがCPUでない場合があるので）
-      return neo->NewVideoFrame(vi, neo->GetDevice(DEV_TYPE_CPU, 0));
-    }
+		PNeoEnv neo = env;
+		if (neo) {
+			// Neoの場合は、CPUデバイスを指定して確保する
+			//（GetFrame外のスレッドから呼び出しているので、
+			//  カレントデバイスがCPUでない場合があるので）
+			return neo->NewVideoFrame(vi, neo->GetDevice(DEV_TYPE_CPU, 0));
+		}
 		return env->NewVideoFrame(vi);
 	}
 
@@ -1039,7 +1056,11 @@ public:
 	}
 
 	PVideoFrame GetFrame(int n, IScriptEnvironment2* env) {
-		PutInputFrame(n + adjustFrames, env);
+		PNeoEnv neo = env;
+		bool thread = !(neo &&
+			(neo->GetProperty(AEP_VERSION) >= 2820) &&
+			(neo->GetProperty(AEP_SUPPRESS_THREAD) > 0));
+		PutInputFrame(n + adjustFrames, thread, env);
 		return WaitFrame(n + adjustFrames, env);
 	}
 };
@@ -1116,7 +1137,7 @@ public:
 		else {
 			env->ThrowError("[D3DVP Error] border must be copy or blank");
 		}
-		
+
 		vi.width = (width > 0) ? width : vi.width;
 		vi.height = (height > 0) ? height : vi.height;
 
@@ -1185,13 +1206,13 @@ int		track_e[] = { 2, 2200, 1200, 100, 100, 5 };	//	トラックバーの上限値
 
 #define	CHECK_N	8													//	チェックボックスの数
 TCHAR	*check_name[] = {   //	チェックボックスの名前
-	"2倍fps化（2倍fpsで入力してね）", 
-	"BFF", 
-	"リサイズ", 
-	"自動補正", 
-	"ノイズ除去", 
-	"エッジ強調", 
-	"YUV420で処理（Radeonとか）", 
+	"2倍fps化（2倍fpsで入力してね）",
+	"BFF",
+	"リサイズ",
+	"自動補正",
+	"ノイズ除去",
+	"エッジ強調",
+	"YUV420で処理（Radeonとか）",
 	"処理しない（デバッグ用）"
 };
 int		check_default[] = { 0, 0, 0, 0, 0, 0, 0, 0 };				//	チェックボックスの初期値 (値は0か1)
@@ -1355,10 +1376,10 @@ class D3DVPAviUtlWork : public D3DVP<std::shared_ptr<AviUtlFrame>, AviUtlErrorHa
 
 	FramePool pool_;
 
-	void (*nv12_to_yc48)(PIXEL_YC* dst, const uint8_t* src, int pitch, int w, int h, int max_w);
-	void (*yuy2_to_yc48)(PIXEL_YC* dst, const uint8_t* src, int pitch, int w, int h, int max_w);
-	void (*yc48_to_nv12)(uint8_t* dst, int pitch, const PIXEL_YC* src, int w, int h, int max_w);
-	void (*yc48_to_yuy2)(uint8_t* dst, int pitch, const PIXEL_YC* src, int w, int h, int max_w);
+	void(*nv12_to_yc48)(PIXEL_YC* dst, const uint8_t* src, int pitch, int w, int h, int max_w);
+	void(*yuy2_to_yc48)(PIXEL_YC* dst, const uint8_t* src, int pitch, int w, int h, int max_w);
+	void(*yc48_to_nv12)(uint8_t* dst, int pitch, const PIXEL_YC* src, int w, int h, int max_w);
+	void(*yc48_to_yuy2)(uint8_t* dst, int pitch, const PIXEL_YC* src, int w, int h, int max_w);
 
 	std::shared_ptr<AviUtlFrame> NewVideoFrame(AviUtlErrorHandler* env)
 	{
@@ -1431,7 +1452,8 @@ public:
 			yc48_to_yuy2 = yc48_to_yuy2_avx2;
 			nv12_to_yc48 = nv12_to_yc48_avx2;
 			yuy2_to_yc48 = yuy2_to_yc48_avx2;
-		} else {
+		}
+		else {
 			yc48_to_nv12 = yc48_to_nv12_c;
 			yc48_to_yuy2 = yc48_to_yuy2_c;
 			nv12_to_yc48 = nv12_to_yc48_c;
@@ -1446,7 +1468,7 @@ public:
 	void GetFrame(FILTER *fp, FILTER_PROC_INFO *fpip, int adjust, AviUtlErrorHandler* env) {
 		fp_ = fp;
 		fpip_ = fpip;
-		PutInputFrame(fpip->frame + adjust, env);
+		PutInputFrame(fpip->frame + adjust, true, env);
 		auto out = WaitFrame(fpip->frame + adjust, env);
 		for (int y = 0; y < height; ++y) {
 			memcpy(fpip_->ycp_edit + fpip_->max_w * y, out->yc + out->w * y, width * sizeof(PIXEL_YC));
@@ -1580,8 +1602,8 @@ public:
 				}
 			}
 			return FALSE;
-		//case WM_FILTER_EXIT:
-		//	break;
+			//case WM_FILTER_EXIT:
+			//	break;
 		case WM_KEYUP:
 		case WM_KEYDOWN:
 		case WM_MOUSEWHEEL:
@@ -1640,7 +1662,7 @@ public:
 		StoreSetting(fp);
 
 		try {
-			w->GetFrame(fp, fpip, fp->track[5] , &eh);
+			w->GetFrame(fp, fpip, fp->track[5], &eh);
 		}
 		catch (const std::string&) {
 			if (retry > 2) {
